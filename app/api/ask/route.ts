@@ -1,38 +1,87 @@
+// app/api/ask/route.ts
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function sleep(ms: number) { return new Promise(res => setTimeout(res, ms)); }
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+function enc(s: string) { return new TextEncoder().encode(s); }
+function sse(write: (s: string) => void) {
+  return (o: any) => write(`data: ${JSON.stringify(o)}\n\n`);
+}
+function rid() {
+  // @ts-ignore
+  return (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || Math.random().toString(36).slice(2);
+}
 
 export async function POST(req: Request) {
   const { query, style = 'simple' } = await req.json();
 
   const stream = new ReadableStream({
     async start(controller) {
-      const enc = new TextEncoder();
-      const send = (obj: any) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      const send = sse((s) => controller.enqueue(enc(s)));
 
-      send({ event: 'status', msg: 'planning' });
-
-      const text = (style === 'expert' ? '**Answer (Expert):** ' : '**Answer:** ') +
-        `Wizkid provides a sourced, concise summary to the query: "${query}". ` +
-        'It streams tokens and shows citations that you can open.' +
-        '\n\nKey points:\n- Citation-first answers.\n- Follow-ups supported.\n- Confidence badge.\n';
-
-      for (const ch of Array.from(text)) {
-        send({ event: 'token', text: ch });
-        await sleep(5);
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        send({ event: 'token', text: '**GEMINI_API_KEY missing**' });
+        send({ event: 'final', snapshot: { id: rid(), markdown: 'Missing key', cites: [], timeline: [], confidence: 'low' } });
+        controller.close();
+        return;
       }
 
-      const cites = [
-        { id: '1', url: 'https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events', title: 'MDN: Server-Sent Events', snippet: 'How SSE works.' },
-        { id: '2', url: 'https://nextjs.org/docs/app/building-your-application/routing/route-handlers', title: 'Next.js Route Handlers', snippet: 'API routes in the App Router.' }
-      ];
+      send({ event: 'status', msg: 'searching (Gemini + Google Search)' });
+
+      const genAI = new GoogleGenerativeAI(apiKey);
+      // Enable Google Search tool (Gemini will search + return citations)
+      const model = genAI.getGenerativeModel({
+        model: 'gemini-1.5-flash',
+        tools: [{ googleSearch: {} }]
+      });
+
+      const sys = `You are Wizkid, a concise, citation-first assistant.
+Use inline [n] citations; prefer official/primary sources.
+Style: ${style === 'expert' ? 'Expert (lawyer-grade)' : 'Simple'}.`;
+
+      const result = await model.generateContentStream({
+        contents: [{ role: 'user', parts: [{ text: `${sys}\n\nQuestion: ${query}` }] }]
+      });
+
+      let finalResponse: any = null;
+
+      for await (const event of result.stream) {
+        // Each event can be turned into text
+        const text = (event as any).text?.();
+        if (text) send({ event: 'token', text });
+        finalResponse = event; // keep last for metadata
+      }
+
+      // Try to gather citations from grounding metadata
+      let cites: any[] = [];
+      try {
+        const full = await result.response;
+        const cand = (full as any)?.candidates?.[0];
+        const gm = cand?.groundingMetadata;
+        const chunks = gm?.groundingChunks || [];
+        cites = chunks.map((g: any, i: number) => {
+          const uri = g?.web?.uri || g?.retrievedContext?.uri;
+          const title = g?.web?.title || uri || `Source ${i + 1}`;
+          return uri ? { id: String(i + 1), url: uri, title } : null;
+        }).filter(Boolean);
+      } catch { /* ignore if missing */ }
+
+      // Emit source cards
       for (const c of cites) send({ event: 'cite', cite: c });
 
-      // unique id
-      // @ts-ignore
-      const id = (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || Math.random().toString(36).slice(2);
-      send({ event: 'final', snapshot: { id, markdown: text, cites, timeline: [], confidence: 'high' } });
+      send({
+        event: 'final',
+        snapshot: {
+          id: rid(),
+          markdown: '(streamed)',
+          cites,
+          timeline: [],
+          confidence: cites.length >= 3 ? 'high' : (cites.length ? 'medium' : 'low')
+        }
+      });
+
       controller.close();
     }
   });
