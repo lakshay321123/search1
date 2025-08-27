@@ -1,8 +1,6 @@
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function sleep(ms: number) { return new Promise(res => setTimeout(res, ms)); }
-
 export async function POST(req: Request) {
   const { query, style = 'simple' } = await req.json();
 
@@ -11,28 +9,102 @@ export async function POST(req: Request) {
       const enc = new TextEncoder();
       const send = (obj: any) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
 
-      send({ event: 'status', msg: 'planning' });
+      send({ event: 'status', msg: 'searching' });
 
-      const text = (style === 'expert' ? '**Answer (Expert):** ' : '**Answer:** ') +
-        `Wizkid provides a sourced, concise summary to the query: "${query}". ` +
-        'It streams tokens and shows citations that you can open.' +
-        '\n\nKey points:\n- Citation-first answers.\n- Follow-ups supported.\n- Confidence badge.\n';
-
-      for (const ch of Array.from(text)) {
-        send({ event: 'token', text: ch });
-        await sleep(5);
+      // Perform search using a generic search API (e.g., Tavily)
+      let results: any[] = [];
+      try {
+        const searchRes = await fetch('https://api.tavily.com/search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.SEARCH_API_KEY ?? ''}`
+          },
+          body: JSON.stringify({ query, max_results: 3 })
+        });
+        const data = await searchRes.json();
+        results = data.results || [];
+      } catch (err) {
+        send({ event: 'status', msg: 'search_failed' });
       }
 
-      const cites = [
-        { id: '1', url: 'https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events', title: 'MDN: Server-Sent Events', snippet: 'How SSE works.' },
-        { id: '2', url: 'https://nextjs.org/docs/app/building-your-application/routing/route-handlers', title: 'Next.js Route Handlers', snippet: 'API routes in the App Router.' }
-      ];
-      for (const c of cites) send({ event: 'cite', cite: c });
+      // Fetch page content for each result and emit cites
+      const cites: any[] = [];
+      for (const [i, r] of results.entries()) {
+        try {
+          const res = await fetch(r.url);
+          const html = await res.text();
+          const snippet = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 200);
+          const cite = { id: String(i + 1), url: r.url, title: r.title || '', snippet };
+          cites.push(cite);
+          send({ event: 'cite', cite });
+        } catch {
+          // ignore individual failures
+        }
+      }
+
+      send({ event: 'status', msg: 'answering' });
+
+      // Build prompt for the LLM using collected citations
+      const prompt = `${style === 'expert' ? 'Provide an expert answer.' : 'Provide a concise answer.'}\nQuestion: ${query}\n\nSources:\n${cites.map(c => `[${c.id}] ${c.url}`).join('\n')}`;
+
+      // Stream response from LLM (e.g., OpenAI)
+      let fullText = '';
+      try {
+        const llmRes = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${process.env.LLM_API_KEY ?? ''}`
+          },
+          body: JSON.stringify({
+            model: 'gpt-3.5-turbo',
+            stream: true,
+            messages: [
+              { role: 'system', content: 'You are a helpful assistant that cites sources.' },
+              { role: 'user', content: prompt }
+            ]
+          })
+        });
+
+        const reader = llmRes.body?.getReader();
+        const decoder = new TextDecoder();
+        if (reader) {
+          let done = false;
+          while (!done) {
+            const { value, done: doneReading } = await reader.read();
+            done = doneReading;
+            if (value) {
+              const chunk = decoder.decode(value);
+              const lines = chunk.split('\n').filter(Boolean);
+              for (const line of lines) {
+                const msg = line.replace(/^data: /, '');
+                if (msg === '[DONE]') {
+                  done = true;
+                  break;
+                }
+                try {
+                  const data = JSON.parse(msg);
+                  const token = data.choices?.[0]?.delta?.content;
+                  if (token) {
+                    fullText += token;
+                    send({ event: 'token', text: token });
+                  }
+                } catch {
+                  // ignore malformed lines
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        send({ event: 'status', msg: 'llm_failed' });
+      }
 
       // unique id
-      // @ts-ignore
       const id = (globalThis.crypto?.randomUUID && globalThis.crypto.randomUUID()) || Math.random().toString(36).slice(2);
-      send({ event: 'final', snapshot: { id, markdown: text, cites, timeline: [], confidence: 'high' } });
+      const markdown = (style === 'expert' ? '**Answer (Expert):** ' : '**Answer:** ') + fullText.trim();
+      send({ event: 'final', snapshot: { id, markdown, cites, timeline: [], confidence: 'unknown' } });
       controller.close();
     }
   });
