@@ -1,0 +1,17 @@
+{
+  "name": "wizkid",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -w @wizkid/backend build && npm run -w @wizkid/frontend build",
+    "dev:backend": "npm run -w @wizkid/backend dev",
+    "dev:frontend": "npm run -w @wizkid/frontend dev",
+    "start:backend": "npm run -w @wizkid/backend start",
+    "start:frontend": "npm run -w @wizkid/frontend start",
+    "lint": "echo \"(add eslint later)\""
+  }
+}
