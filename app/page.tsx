@@ -33,28 +33,46 @@ export default function Home() {
       return;
     }
 
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-      for (const chunk of parts) {
-        if (!chunk.startsWith('data:')) continue;
-        const json = chunk.slice(5).trim();
-        try {
-          const evt = JSON.parse(json);
-          if (evt.event === 'status') setStatus(evt.msg);
+      const handleError = (msg: string) => {
+        setStatus(msg);
+        abortRef.current?.abort();
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const chunk of parts) {
+          if (!chunk.startsWith('data:')) {
+            handleError('Malformed SSE chunk');
+            return;
+          }
+          const json = chunk.slice(5).trim();
+          let evt;
+          try {
+            evt = JSON.parse(json);
+          } catch {
+            handleError('Malformed SSE chunk');
+            return;
+          }
+          if (evt.event === 'status') {
+            setStatus(evt.msg);
+            if (typeof evt.msg === 'string' && evt.msg.startsWith('error')) {
+              abortRef.current?.abort();
+              return;
+            }
+          }
           if (evt.event === 'token') setAnswer(a => a + evt.text);
           if (evt.event === 'cite') setCites(c => [...c, evt.cite]);
           if (evt.event === 'final') setConfidence(evt.snapshot.confidence);
-        } catch { /* noop */ }
+        }
       }
-    }
   }
 
   return (
