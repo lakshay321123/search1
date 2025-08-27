@@ -21,8 +21,7 @@ export default function Home() {
     const ac = new AbortController();
     abortRef.current = ac;
 
-    const backend = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:8787';
-    const resp = await fetch(`${backend}/ask`, {
+    const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, depth: 'standard', style: 'simple' }),
@@ -59,19 +58,16 @@ export default function Home() {
   }
 
   return (
-    <main className="flex flex-col items-center">
-      <h1 className="text-3xl font-bold mb-8 text-center">Wizkid</h1>
-      <form onSubmit={ask} className="w-full flex gap-2 mb-6">
+    <main>
+      <h1 className="text-3xl font-bold mb-4">Wizkid</h1>
+      <form onSubmit={ask} className="flex gap-2 mb-6">
         <input
           value={query}
           onChange={(e)=>setQuery(e.target.value)}
-          className="w-full rounded-xl px-4 py-3 bg-white/10 outline-none border border-white/20"
+          className="flex-1 rounded-xl px-4 py-3 bg-white/10 outline-none"
           placeholder="Ask anything..."
         />
-        <button
-          className="px-5 py-3 rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 text-white hover:from-blue-600 hover:to-cyan-600"
-          type="submit"
-        >
+        <button className="px-5 py-3 rounded-xl bg-white/20 hover:bg-white/30" type="submit">
           Ask
         </button>
       </form>
