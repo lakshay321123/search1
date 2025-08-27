@@ -1,5 +1,7 @@
 node_modules/
+.next/
 apps/backend/dist/
 apps/frontend/.next/
 apps/frontend/next-env.d.ts
 *.log
+.env
