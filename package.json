@@ -1,23 +1,17 @@
 {
-  "name": "@wizkid/backend",
-  "version": "0.1.0",
-  "type": "module",
+  "name": "wizkid",
   "private": true,
-  "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js"
-  },
-  "dependencies": {
-    "axios": "^1.7.2",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "nanoid": "^5.0.7"
-  },
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*"],
   "devDependencies": {
-    "@types/node": "^20.12.12",
-    "tsx": "^4.16.2",
-    "typescript": "^5.5.4"
+    "@types/node": "^20.12.12"
+  },
+  "scripts": {
+    "build": "npm run -w @wizkid/backend build && npm run -w @wizkid/frontend build",
+    "dev:backend": "npm run -w @wizkid/backend dev",
+    "dev:frontend": "npm run -w @wizkid/frontend dev",
+    "start:backend": "npm run -w @wizkid/backend start",
+    "start:frontend": "npm run -w @wizkid/frontend start",
+    "lint": "echo \"(add eslint later)\""
   }
 }
