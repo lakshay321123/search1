@@ -4,11 +4,10 @@ export type SearchResult = { title: string; url: string; snippet?: string; domai
 export type Place = {
   id: string;
   name: string;
-  type: string;              // doctor/clinic/hospital/restaurant/etc.
   address?: string;
   lat: number; lon: number;
   distance_m?: number;
   phone?: string;
   website?: string;
-  osmUrl?: string;
+  source?: string;
 };

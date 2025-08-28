@@ -8,6 +8,8 @@ import { discoverPeople } from '../../../lib/people/discover';
 import { getWikidataSocials } from '../../../lib/tools/wikidata';
 import { findSocialLinks, searchCSEMany } from '../../../lib/tools/googleCSE';
 import { searchNearbyOverpass } from '../../../lib/local/overpass';
+import { searchNearbyGeoapify } from '../../../lib/local/geoapify';
+import { streamOpenAI } from '../../../lib/llm/openai';
 import { domainScore, recordShow } from '../../../lib/learn/domains';
 import { loadEntityBias } from '../../../lib/learn/entities';
 import { nameScore } from '../../../lib/text/similarity';
@@ -18,11 +20,40 @@ const rid = () => (globalThis as any).crypto?.randomUUID?.() || Math.random().to
 const norm = (u: string) => { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } };
 async function streamPlain(send:(o:any)=>void, text:string){ for (const ch of (text.match(/.{1,90}(\s|$)/g) || [text])) send({event:'token', text: ch}); }
 
-type Req = { query: string; subject?: string; coords?: { lat: number, lon: number }; style?: 'simple'|'expert' };
+async function streamLLM(prompt: string, provider: 'auto'|'openai'|'gemini', send:(o:any)=>void) {
+  const wantOpenAI = provider === 'openai' || (provider === 'auto' && process.env.OPENAI_API_KEY);
+  if (wantOpenAI) {
+    try { await streamOpenAI(prompt, t => send({ event:'token', text:t })); return true; } catch {}
+  }
+  const key = process.env.GEMINI_API_KEY;
+  const wantGemini = provider === 'gemini' || (provider === 'auto' && key);
+  if (wantGemini && key) {
+    try {
+      const genAI = new GoogleGenerativeAI(key);
+      const names = ['gemini-1.5-flash-8b','gemini-1.5-flash'];
+      for (const name of names) {
+        try {
+          const model = genAI.getGenerativeModel({ model: name } as any);
+          const res = await model.generateContentStream({ contents:[{ role:'user', parts:[{ text: prompt }]}] });
+          for await (const ev of (res as any).stream) {
+            const t = typeof (ev as any).text === 'function'
+              ? (ev as any).text()
+              : (ev as any)?.candidates?.[0]?.content?.parts?.map((p:any)=>p.text).join('') || '';
+            if (t) send({ event:'token', text: t });
+          }
+          return true;
+        } catch {}
+      }
+    } catch {}
+  }
+  return false;
+}
+
+type Req = { query: string; subject?: string; coords?: { lat: number, lon: number }; provider?: 'auto'|'openai'|'gemini' };
 
 export async function POST(req: Request) {
   const body = await req.json() as Req;
-  const { query, subject, coords, style = 'simple' } = body;
+  const { query, subject, coords, provider = 'auto' } = body;
   const workingQuery = query.trim();
   const bias = await loadEntityBias(workingQuery);
 
@@ -31,16 +62,20 @@ export async function POST(req: Request) {
       const send = sse((s)=>controller.enqueue(enc(s)));
       try {
         const intent = detectIntent(query);
-        // LOCAL MODE (doctor near me, etc.)
+        // LOCAL MODE (near me)
         if (intent === 'local' && coords?.lat && coords?.lon) {
-          const { places, usedCategory } = await searchNearbyOverpass(query, coords.lat, coords.lon);
-          send({ event: 'status', msg: `local:${usedCategory || 'unknown'}` });
+          let places: Place[] = await searchNearbyGeoapify(query, coords.lat, coords.lon);
+          if (!places.length) {
+            const fallback = await searchNearbyOverpass(query, coords.lat, coords.lon);
+            places = fallback.places;
+          }
+          send({ event: 'status', msg: 'local' });
           send({ event: 'places', places });
           if (places.length) {
-            const line = `Top ${usedCategory || 'places'} near you: ${places.slice(0,5).map(p => `${p.name} (${Math.round((p.distance_m||0)/100)/10}km)`).join(', ')}. `;
+            const line = `Top places near you: ${places.slice(0,5).map(p => `${p.name} (${Math.round((p.distance_m||0)/100)/10}km)`).join(', ')}. `;
             await streamPlain(send, line);
           } else {
-            await streamPlain(send, `I couldn’t find ${usedCategory || 'relevant'} results near you. Try expanding the radius or a different term.`);
+            await streamPlain(send, `I couldn’t find relevant results near you. Try expanding the radius or a different term.`);
           }
           send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites: [], timeline: [], confidence: places.length ? 'medium' : 'low' } });
           controller.close(); return;
@@ -109,9 +144,7 @@ export async function POST(req: Request) {
           cites = scored.map(x=>x.c);
           for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
 
-          // Summarize (Gemini → fallback)
-          const apiKey = process.env.GEMINI_API_KEY;
-          let streamed = false; let quotaHit = false;
+          // Summarize
           const sys = `You are Wizkid, a citation-first assistant.
 Write a concise PERSON BIO in <= 200 words (6–10 sentences).
 STRICT RULES:
@@ -122,23 +155,8 @@ STRICT RULES:
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
           const prompt = `${sys}\n\nSubject: ${subjectName}\n\nNumbered sources:\n${sourceList}\n`;
 
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
-
-          if (apiKey) {
-            send({ event: 'status', msg: 'summarizing' });
-            try { await tryModel('gemini-1.5-flash-8b'); } catch (e:any) { quotaHit = /429|quota/i.test(String(e?.message||e||'')); }
-            if (!streamed && !quotaHit) { try { await tryModel('gemini-1.5-flash'); } catch (e2:any) { quotaHit ||= /429|quota/i.test(String(e2?.message||e2||'')); } }
-          }
+          send({ event: 'status', msg: 'summarizing' });
+          const streamed = await streamLLM(prompt, provider, send);
           if (!streamed) await streamPlain(send, `Here’s a short profile of ${subjectName} from the cited sources.\n`);
 
           const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
@@ -163,29 +181,14 @@ STRICT RULES:
           for (const c of reordered) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
           cites.splice(0, cites.length, ...reordered);
 
-          // stream concise answer (Gemini → fallback from snippets)
-          const apiKey = process.env.GEMINI_API_KEY;
-          let streamed = false;
+          // stream concise answer
           const sys = `You are Wizkid, a citation-first assistant.
 Write a concise answer in <= 180 words with per-sentence [n] citations referencing the numbered sources. Only use facts supported by sources. No meta commentary.`;
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
           const prompt = `${sys}\n\nQuery: ${askFor}\n\nNumbered sources:\n${sourceList}\n`;
 
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
-
-          if (apiKey) { try { await tryModel('gemini-1.5-flash-8b'); } catch {} if (!streamed) { try { await tryModel('gemini-1.5-flash'); } catch {} } }
+          const streamed = await streamLLM(prompt, provider, send);
           if (!streamed) {
-            // fallback: stitch snippets
             const text = cites.slice(0,5).map((c,i)=>`${c.title} [${i+1}]: ${c.snippet || ''}`).join('\n');
             await streamPlain(send, text || `I couldn’t generate a summary, but the sources above may help.`);
           }
