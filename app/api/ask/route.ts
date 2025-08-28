@@ -1,7 +1,6 @@
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import type { Cite, Place } from '../../../lib/types';
 import { detectIntent } from '../../../lib/intent';
 import { discoverPeople } from '../../../lib/people/discover';
@@ -18,11 +17,11 @@ const rid = () => (globalThis as any).crypto?.randomUUID?.() || Math.random().to
 const norm = (u: string) => { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } };
 async function streamPlain(send:(o:any)=>void, text:string){ for (const ch of (text.match(/.{1,90}(\s|$)/g) || [text])) send({event:'token', text: ch}); }
 
-type Req = { query: string; subject?: string; coords?: { lat: number, lon: number }; style?: 'simple'|'expert' };
+type Req = { query: string; subject?: string; coords?: { lat: number, lon: number }; style?: 'simple'|'expert'; provider?: 'openai'|'gemini'|'auto' };
 
 export async function POST(req: Request) {
   const body = await req.json() as Req;
-  const { query, subject, coords, style = 'simple' } = body;
+  const { query, subject, coords, style = 'simple', provider } = body;
   const workingQuery = query.trim();
   const bias = await loadEntityBias(workingQuery);
 
@@ -109,37 +108,72 @@ export async function POST(req: Request) {
           cites = scored.map(x=>x.c);
           for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
 
-          // Summarize (Gemini → fallback)
-          const apiKey = process.env.GEMINI_API_KEY;
-          let streamed = false; let quotaHit = false;
-          const sys = `You are Wizkid, a citation-first assistant.
-Write a concise PERSON BIO in <= 200 words (6–10 sentences).
-STRICT RULES:
-- Use ONLY the numbered sources below. If a fact isn’t supported there, omit it.
-- After EACH sentence, include a [n] citation. No sentence without a citation.
-- Prefer dated facts and current titles. If dates conflict, omit the claim.
-- No meta commentary or speculation.`;
+          const primary = { title: subjectName };
+          const working = subjectName;
+
+          // ---------- PROVIDER-AWARE SUMMARIZATION ----------
+          // Inputs available: `cites` (array), `working` or `primary.title` (subject), and `send`, `streamPlain` helpers.
+
+          let streamed = false;
+          const providerPref = (typeof provider === 'string' ? provider
+            : (typeof (globalThis as any).provider === 'string' ? (globalThis as any).provider : 'auto')) || 'auto';
+
+          // We'll just compute one prompt string here; reuse in both providers:
+          const sys = `You are Wizkid. Write a concise answer in <= 180-200 words with per-sentence [n] citations from the numbered sources. No speculation.`;
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const prompt = `${sys}\n\nSubject: ${subjectName}\n\nNumbered sources:\n${sourceList}\n`;
+          const subjectLine = typeof (primary?.title) === 'string' ? `Subject: ${primary.title}` : `Query: ${working}`;
+          const prompt = `${sys}\n\n${subjectLine}\n\nNumbered sources:\n${sourceList}\n`;
 
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
-
-          if (apiKey) {
-            send({ event: 'status', msg: 'summarizing' });
-            try { await tryModel('gemini-1.5-flash-8b'); } catch (e:any) { quotaHit = /429|quota/i.test(String(e?.message||e||'')); }
-            if (!streamed && !quotaHit) { try { await tryModel('gemini-1.5-flash'); } catch (e2:any) { quotaHit ||= /429|quota/i.test(String(e2?.message||e2||'')); } }
+          // Helpers to attempt providers in order
+          async function tryOpenAI() {
+            // dynamic import so this file still builds if OPENAI isn't configured
+            const { openaiGenerate } = await import("../../../lib/llm/openai");
+            const text = await openaiGenerate(prompt, sys, process.env.OPENAI_MODEL);
+            if (text) { await streamPlain(send, text); return true; }
+            return false;
           }
-          if (!streamed) await streamPlain(send, `Here’s a short profile of ${subjectName} from the cited sources.\n`);
+
+          async function tryGemini() {
+            try {
+              const { GoogleGenerativeAI } = await import("@google/generative-ai");
+              const apiKey = process.env.GEMINI_API_KEY;
+              if (!apiKey) return false;
+              const genAI = new GoogleGenerativeAI(apiKey);
+              const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-8b" });
+              const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
+
+              let any = false;
+              for await (const ev of (res as any).stream) {
+                const t = typeof (ev as any).text === 'function'
+                  ? (ev as any).text()
+                  : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+                if (t && /\S/.test(t)) { any = true; send({ event: 'token', text: t }); }
+              }
+              return any;
+            } catch { return false; }
+          }
+
+          // Decide provider order
+          const haveOpenAI = !!process.env.OPENAI_API_KEY;
+          const haveGemini = !!process.env.GEMINI_API_KEY;
+
+          const order: Array<"openai"|"gemini"> =
+            providerPref === "openai" ? ["openai","gemini"] :
+            providerPref === "gemini" ? ["gemini","openai"] :
+            haveOpenAI ? ["openai","gemini"] : ["gemini","openai"];
+
+          for (const p of order) {
+            try {
+              const ok = p === "openai" ? await tryOpenAI() : await tryGemini();
+              if (ok) { streamed = true; break; }
+            } catch {}
+          }
+
+          // Fallback: stitched text from sources if both providers failed or no keys set
+          if (!streamed) {
+            const text = cites.slice(0,5).map((c,i)=>`${c.title} [${i+1}]: ${c.snippet || ''}`).join('\n');
+            await streamPlain(send, text || `No sources found. Web search may be disabled or rate-limited.`);
+          }
 
           const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
           send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites, timeline: [], confidence: conf } });
@@ -163,31 +197,70 @@ STRICT RULES:
           for (const c of reordered) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
           cites.splice(0, cites.length, ...reordered);
 
-          // stream concise answer (Gemini → fallback from snippets)
-          const apiKey = process.env.GEMINI_API_KEY;
+          const primary = undefined as any;
+          const working = askFor;
+
+          // ---------- PROVIDER-AWARE SUMMARIZATION ----------
+          // Inputs available: `cites` (array), `working` or `primary.title` (subject), and `send`, `streamPlain` helpers.
+
           let streamed = false;
-          const sys = `You are Wizkid, a citation-first assistant.
-Write a concise answer in <= 180 words with per-sentence [n] citations referencing the numbered sources. Only use facts supported by sources. No meta commentary.`;
+          const providerPref = (typeof provider === 'string' ? provider
+            : (typeof (globalThis as any).provider === 'string' ? (globalThis as any).provider : 'auto')) || 'auto';
+
+          // We'll just compute one prompt string here; reuse in both providers:
+          const sys = `You are Wizkid. Write a concise answer in <= 180-200 words with per-sentence [n] citations from the numbered sources. No speculation.`;
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const prompt = `${sys}\n\nQuery: ${askFor}\n\nNumbered sources:\n${sourceList}\n`;
+          const subjectLine = typeof (primary?.title) === 'string' ? `Subject: ${primary.title}` : `Query: ${working}`;
+          const prompt = `${sys}\n\n${subjectLine}\n\nNumbered sources:\n${sourceList}\n`;
 
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
+          // Helpers to attempt providers in order
+          async function tryOpenAI() {
+            const { openaiGenerate } = await import("../../../lib/llm/openai");
+            const text = await openaiGenerate(prompt, sys, process.env.OPENAI_MODEL);
+            if (text) { await streamPlain(send, text); return true; }
+            return false;
+          }
 
-          if (apiKey) { try { await tryModel('gemini-1.5-flash-8b'); } catch {} if (!streamed) { try { await tryModel('gemini-1.5-flash'); } catch {} } }
+          async function tryGemini() {
+            try {
+              const { GoogleGenerativeAI } = await import("@google/generative-ai");
+              const apiKey = process.env.GEMINI_API_KEY;
+              if (!apiKey) return false;
+              const genAI = new GoogleGenerativeAI(apiKey);
+              const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-8b" });
+              const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
+
+              let any = false;
+              for await (const ev of (res as any).stream) {
+                const t = typeof (ev as any).text === 'function'
+                  ? (ev as any).text()
+                  : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
+                if (t && /\S/.test(t)) { any = true; send({ event: 'token', text: t }); }
+              }
+              return any;
+            } catch { return false; }
+          }
+
+          // Decide provider order
+          const haveOpenAI = !!process.env.OPENAI_API_KEY;
+          const haveGemini = !!process.env.GEMINI_API_KEY;
+
+          const order: Array<"openai"|"gemini"> =
+            providerPref === "openai" ? ["openai","gemini"] :
+            providerPref === "gemini" ? ["gemini","openai"] :
+            haveOpenAI ? ["openai","gemini"] : ["gemini","openai"];
+
+          for (const p of order) {
+            try {
+              const ok = p === "openai" ? await tryOpenAI() : await tryGemini();
+              if (ok) { streamed = true; break; }
+            } catch {}
+          }
+
+          // Fallback: stitched text from sources if both providers failed or no keys set
           if (!streamed) {
-            // fallback: stitch snippets
             const text = cites.slice(0,5).map((c,i)=>`${c.title} [${i+1}]: ${c.snippet || ''}`).join('\n');
-            await streamPlain(send, text || `I couldn’t generate a summary, but the sources above may help.`);
+            await streamPlain(send, text || `No sources found. Web search may be disabled or rate-limited.`);
           }
 
           const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
