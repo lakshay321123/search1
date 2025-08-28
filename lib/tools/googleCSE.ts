@@ -1,32 +1,40 @@
-import type { SearchResult } from '../../lib/types';
-function domainOf(u: string) { try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; } }
-function norm(u: string) { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } }
+type Hit = { url: string; title: string; snippet?: string };
 
-export async function searchCSE(q: string, num = 6): Promise<SearchResult[]> {
-  const key = process.env.GOOGLE_CSE_KEY, cx = process.env.GOOGLE_CSE_ID;
-  if (!key || !cx) return [];
-  const url = `https://www.googleapis.com/customsearch/v1?key=${key}&cx=${cx}&q=${encodeURIComponent(q)}&num=${num}`;
-  const r = await fetch(url, { cache: 'no-store' });
+const ID  = process.env.GOOGLE_CSE_ID || '';
+const KEY = process.env.GOOGLE_CSE_KEY || '';
+
+function ok() { return !!ID && !!KEY; }
+
+export async function searchCSE(query: string, num = 5): Promise<Hit[]> {
+  if (!ok()) return [];
+  const u = new URL('https://www.googleapis.com/customsearch/v1');
+  u.searchParams.set('q', query);
+  u.searchParams.set('cx', ID);
+  u.searchParams.set('key', KEY);
+  u.searchParams.set('num', String(Math.min(10, Math.max(1, num))));
+  const r = await fetch(u, { cache: 'no-store' });
   if (!r.ok) return [];
   const j: any = await r.json();
-  const items: any[] = j.items || [];
-  const seen = new Set<string>(); const out: SearchResult[] = [];
-  for (const it of items.slice(0, num)) {
-    const u = norm(it.link);
-    if (seen.has(u)) continue; seen.add(u);
-    out.push({ title: it.title, url: u, snippet: it.snippet, domain: domainOf(u) });
-  }
-  return out;
+  return (j.items || []).map((it: any) => ({
+    url: it.link, title: it.title, snippet: it.snippet
+  }));
 }
 
-export async function searchCSEMany(queries: string[], perQuery = 3) {
-  const batches = await Promise.all(queries.map(q => searchCSE(q, perQuery)));
-  const seen = new Set<string>(); const out: SearchResult[] = [];
-  for (const arr of batches) for (const r of arr) {
-    const k = norm(r.url); if (!seen.has(k)) { seen.add(k); out.push(r); }
+export async function searchCSEMany(queries: string[], perQuery = 3): Promise<Hit[]> {
+  if (!ok()) return [];
+  const results: Hit[] = [];
+  for (const q of queries) {
+    const part = await searchCSE(q, perQuery);
+    for (const h of part) {
+      if (!results.some(x => x.url === h.url)) results.push(h);
+      if (results.length >= 12) break;
+    }
+    if (results.length >= 12) break;
   }
-  return out;
+  return results;
 }
+
+export function cseMissing(): boolean { return !ok(); }
 
 /** Try to find official social links via CSE (Wiki, LinkedIn, Instagram, Facebook, X/Twitter). */
 export async function findSocialLinks(name: string) {
@@ -40,10 +48,9 @@ export async function findSocialLinks(name: string) {
     `site:twitter.com "${person}"`
   ];
   const flat = (await Promise.all(queries.map(q => searchCSE(q, 4)))).flat();
-  const byHost = (host: string) => flat.find(r => (r.domain || '').endsWith(host));
-  const linkedin = flat
-    .filter(r => (r.domain || '').endsWith('linkedin.com'))
-    .sort((a,b) => scoreLinkedIn(b.url, person) - scoreLinkedIn(a.url, person))[0];
+  const byHost = (host: string) => flat.find(r => { try { return new URL(r.url).hostname.endsWith(host); } catch { return false; } });
+  const filterHost = (host: string) => flat.filter(r => { try { return new URL(r.url).hostname.endsWith(host); } catch { return false; } });
+  const linkedin = filterHost('linkedin.com').sort((a,b)=>scoreLinkedIn(b.url, person) - scoreLinkedIn(a.url, person))[0];
   return { wiki: byHost('wikipedia.org'), linkedin, insta: byHost('instagram.com'), fb: byHost('facebook.com'),
            x: byHost('x.com') || byHost('twitter.com'), all: flat };
 }
