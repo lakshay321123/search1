@@ -34,7 +34,8 @@ export async function POST(req: Request) {
       // Enable Google Search tool (Gemini will search + return citations)
       const model = genAI.getGenerativeModel({
         model: 'gemini-1.5-flash',
-        tools: [{ googleSearch: {} }]
+        // Cast to any to allow googleSearch tool until types are available
+        tools: [{ googleSearch: {} }] as any
       });
 
       const sys = `You are Wizkid, a concise, citation-first assistant.
