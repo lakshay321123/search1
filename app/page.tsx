@@ -8,7 +8,7 @@ type RelatedItem = { label: string; prompt: string };
 type Place = { id: string; name: string; type: string; address?: string; lat: number; lon: number; distance_m?: number; phone?: string; website?: string; osmUrl?: string };
 
 export default function Home() {
-  const [query, setQuery] = useState('');            // empty by default
+  const [query, setQuery] = useState('');
   const [subject, setSubject] = useState<string|undefined>();
   const [coords, setCoords] = useState<{lat:number, lon:number}|undefined>();
   const [answer, setAnswer] = useState('');
@@ -20,13 +20,29 @@ export default function Home() {
   const [places, setPlaces] = useState<Place[]>([]);
   const [confidence, setConfidence] = useState<string|undefined>();
   const [busy, setBusy] = useState(false);
-  const abortRef = useRef<AbortController|null>(null);
   const [voteSent, setVoteSent] = useState<null | 'up' | 'down'>(null);
   const [downReason, setDownReason] = useState<string | null>(null);
+  const abortRef = useRef<AbortController|null>(null);
 
   function resetAll() {
     setQuery(''); setSubject(undefined); setProfile(undefined); setCandidates([]); setRelated([]);
     setCites([]); setAnswer(''); setPlaces([]); setConfidence(undefined); setStatus(undefined);
+    setVoteSent(null); setDownReason(null);
+  }
+
+  function looksLocal(q: string) { return /\bnear me\b|\bnearby\b/i.test(q); }
+
+  async function getCoordsOnce(ms = 4000): Promise<{lat:number, lon:number} | null> {
+    if (!('geolocation' in navigator)) return null;
+    return new Promise(resolve => {
+      let done = false;
+      const timer = setTimeout(() => { if (!done) { done = true; resolve(null); } }, ms);
+      navigator.geolocation.getCurrentPosition(
+        pos => { if (!done) { done = true; clearTimeout(timer); resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }); } },
+        ()   => { if (!done) { done = true; clearTimeout(timer); resolve(null); } },
+        { enableHighAccuracy: true, maximumAge: 120000, timeout: ms }
+      );
+    });
   }
 
   async function ask(e?: React.FormEvent, qOverride?: string) {
@@ -36,6 +52,15 @@ export default function Home() {
     const q = (qOverride ?? query).trim();
     if (!q) { setBusy(false); return; }
 
+    // Try to acquire coords automatically for local queries
+    let coordPayload = coords;
+    if (!coordPayload && looksLocal(q)) {
+      const c = await getCoordsOnce(4000);
+      if (c) setCoords(c);
+      coordPayload = c || undefined;
+    }
+
+    // reset answer state
     setAnswer(''); setCites([]); setConfidence(undefined); setProfile(undefined);
     setCandidates([]); setRelated([]); setPlaces([]); setStatus('');
     setVoteSent(null); setDownReason(null);
@@ -44,7 +69,7 @@ export default function Home() {
     const ac = new AbortController(); abortRef.current = ac;
     const resp = await fetch('/api/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, subject, coords }),
+      body: JSON.stringify({ query: q, subject, coords: coordPayload }),
       signal: ac.signal
     }).catch(() => undefined);
 
@@ -63,8 +88,7 @@ export default function Home() {
           const evt = JSON.parse(json);
           if (evt.event === 'status') setStatus(evt.msg);
           if (evt.event === 'token') setAnswer(a => a + evt.text);
-          if (evt.event === 'cite')
-            setCites(c => c.some(x => x.url === evt.cite.url) ? c : [...c, evt.cite]);
+          if (evt.event === 'cite') setCites(c => c.some(x => x.url === evt.cite.url) ? c : [...c, evt.cite]);
           if (evt.event === 'profile') { setProfile(evt.profile); if (evt.profile?.title) setSubject(evt.profile.title); }
           if (evt.event === 'candidates') setCandidates(evt.candidates || []);
           if (evt.event === 'related') setRelated(evt.items || []);
@@ -76,29 +100,6 @@ export default function Home() {
     }
     setBusy(false);
   }
-
-  async function sendFeedback(vote: 'up'|'down', reason?: string) {
-    if (voteSent) return;
-    try {
-      await fetch('/api/feedback', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({
-          query,
-          subject: profile?.title,
-          vote,
-          reason,
-          cites: cites.map(c => ({ url: c.url })),
-        })
-      });
-      setVoteSent(vote);
-    } catch {}
-  }
-
-  const onOpen = async (url: string) => {
-    try { await fetch('/api/click', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) }); } catch {}
-    window.open(url, '_blank', 'noreferrer');
-  };
 
   const socialLinks = useMemo(() => {
     const find = (pred: (u: URL)=>boolean) =>
@@ -112,15 +113,37 @@ export default function Home() {
     return { wiki, linkedin, insta, fb, x };
   }, [cites, profile]);
 
+  const onOpen = async (url: string) => {
+    try { await fetch('/api/click', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) }); } catch {}
+    window.open(url, '_blank','noreferrer');
+  };
+
+  async function sendFeedback(vote: 'up'|'down', reason?: string) {
+    if (voteSent) return;
+    try {
+      await fetch('/api/feedback', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ query, subject: profile?.title, vote, reason, cites: cites.map(c => ({ url: c.url })) })
+      });
+      setVoteSent(vote);
+      // On wrong-person, immediately re-run with updated memory
+      if (vote === 'down' && reason === 'wrong_person') {
+        setProfile(undefined);
+        await ask(undefined, query);
+      }
+    } catch {}
+  }
+
   return (
     <main className="max-w-3xl mx-auto p-4">
-      {/* Header with LOGO = HOME */}
+      {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <button onClick={resetAll} className="text-3xl font-bold hover:opacity-80">Wizkid</button>
         <button
           onClick={() => navigator.geolocation?.getCurrentPosition(
             pos => setCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
-            () => setStatus('location denied')
+            () => setStatus('location permission denied')
           )}
           className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-sm"
         >
@@ -136,24 +159,25 @@ export default function Home() {
           className="flex-1 rounded-xl px-4 py-3 bg-white/10 outline-none"
           placeholder="Ask anything… e.g., “doctor near me”, “Amit Shah”, “CLS Foods India Private Limited”"
         />
-        <button className="px-5 py-3 rounded-xl bg-white/20 hover:bg-white/30 disabled:opacity-50" type="submit" disabled={busy}>
+        <button className="px-5 py-3 rounded-xl bg.white/20 hover:bg-white/30 disabled:opacity-50" type="submit" disabled={busy}>
           {busy ? 'Asking…' : 'Ask'}
         </button>
       </form>
 
-      {/* Did you mean… */}
+      {/* Did you mean / candidates */}
       {candidates.length > 0 && (
         <div className="mb-3">
           <div className="text-sm opacity-80 mb-1">Did you mean:</div>
           <div className="flex flex-wrap gap-2">
             {candidates.map(c => (
               <button key={c.title}
-                onClick={() => { setQuery(c.title); setSubject(c.title); ask(undefined, c.title); }}
+                onClick={() => { setQuery(c.title); setSubject(c.title); setProfile(undefined); setAnswer(''); setCites([]); setConfidence(undefined); setRelated([]); setPlaces([]); setStatus(''); setCandidates([]); setVoteSent(null); setDownReason(null);  ask(undefined, c.title); }}
                 className="px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20">
                 {c.title}
               </button>
             ))}
           </div>
+          {!profile && <div className="mt-2 text-sm opacity-80">Multiple matches found — please pick the right profile above.</div>}
         </div>
       )}
 
@@ -175,44 +199,51 @@ export default function Home() {
         </section>
       )}
 
-      {/* Streaming answer */}
+      {/* Answer */}
       <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
         {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
         <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
         {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
+
+        {/* Feedback */}
+        {(answer || cites.length) && (
+          <>
+            <div className="mt-3 flex items-center gap-3 text-sm">
+              <button
+                onClick={() => sendFeedback('up')}
+                disabled={!!voteSent}
+                className={`px-3 py-1 rounded ${voteSent==='up' ? 'bg-green-600/40' : 'bg-white/10 hover:bg-white/20'}`}
+              >👍 Helpful</button>
+
+              <button
+                onClick={() => { setDownReason(null); sendFeedback('down'); }}
+                disabled={!!voteSent}
+                className={`px-3 py-1 rounded ${voteSent==='down' ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}
+              >👎 Not helpful</button>
+            </div>
+
+            {voteSent==='down' && (
+              <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                {[
+                  ['wrong_person','Wrong person'],
+                  ['outdated','Outdated info'],
+                  ['low_quality','Low-quality sources'],
+                  ['not_local','Not local'],
+                  ['other','Other…'],
+                ].map(([key,label]) => (
+                  <button key={key}
+                    onClick={() => { setDownReason(key); sendFeedback('down', key); }}
+                    className={`px-2 py-1 rounded ${downReason===key ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
       </article>
-      <div className="mt-3 flex items-center gap-3 text-sm">
-        <button
-          onClick={() => sendFeedback('up')}
-          disabled={!!voteSent}
-          className={`px-3 py-1 rounded ${voteSent==='up' ? 'bg-green-600/40' : 'bg-white/10 hover:bg-white/20'}`}
-        >👍 Helpful</button>
 
-        <button
-          onClick={() => { setDownReason(null); sendFeedback('down'); }}
-          disabled={!!voteSent}
-          className={`px-3 py-1 rounded ${voteSent==='down' ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}
-        >👎 Not helpful</button>
-      </div>
-      {voteSent==='down' && (
-        <div className="mt-2 flex flex-wrap gap-2 text-xs">
-          {[
-            ['wrong_person','Wrong person'],
-            ['outdated','Outdated info'],
-            ['low_quality','Low-quality sources'],
-            ['not_local','Not local'],
-            ['other','Other…'],
-          ].map(([key,label]) => (
-            <button key={key}
-              onClick={() => { setDownReason(key); sendFeedback('down', key); }}
-              className={`px-2 py-1 rounded ${downReason===key ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}>
-              {label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Places list for local */}
+      {/* Places (local) */}
       {!!places.length && (
         <section className="mt-4">
           <div className="text-sm opacity-80 mb-1">Nearby</div>

@@ -1,6 +1,6 @@
 import { redis, hasRedis } from '../store/kv';
 
-const NS = 'wizkid:dom'; // namespace
+const NS = 'wizkid:dom';
 
 function hostOf(u: string) {
   try { return new URL(u).hostname.replace(/^www\./,'').toLowerCase(); } catch { return ''; }
@@ -25,6 +25,6 @@ export async function domainScore(url: string): Promise<number> {
   const shows = Number(row?.shows || 0);
   const clicks = Number(row?.clicks || 0);
   const ctr = clicks / Math.max(1, shows);
-  // Wilson-ish smoothing + small click bonus; cap to keep sane
+  // Wilson-ish smoothing + click bonus, bounded
   return Math.min(5, (ctr * 2) + Math.min(1, clicks / 10));
 }

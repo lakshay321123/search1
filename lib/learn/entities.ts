@@ -2,8 +2,7 @@ import { redis, hasRedis } from '../store/kv';
 import { normalizeName } from '../text/similarity';
 
 const NS = 'wizkid:ent';
-
-function qKey(q: string) { return `${NS}:${normalizeName(q)}`; }
+const qKey = (q: string) => `${NS}:${normalizeName(q)}`;
 
 export async function preferEntity(query: string, name: string, weight = 1) {
   if (!hasRedis()) return;
