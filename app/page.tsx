@@ -2,6 +2,7 @@
 import { useState, useRef } from 'react';
 
 type Cite = { id: string; url: string; title: string; snippet?: string; quote?: string; published_at?: string };
+type AskRequest = { query: string; style: 'simple' | 'expert' };
 
 export default function Home() {
   const [query, setQuery] = useState('What is Wizkid?');
@@ -21,10 +22,11 @@ export default function Home() {
     const ac = new AbortController();
     abortRef.current = ac;
 
+    const payload: AskRequest = { query, style: 'simple' };
     const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query, depth: 'standard', style: 'simple' }),
+      body: JSON.stringify(payload),
       signal: ac.signal,
     });
 
