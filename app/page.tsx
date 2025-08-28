@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 
 type Cite = { id: string; url: string; title: string; snippet?: string; quote?: string; published_at?: string };
 type AskRequest = { query: string; style: 'simple' | 'expert' };
@@ -12,6 +12,7 @@ export default function Home() {
   const [confidence, setConfidence] = useState<string | undefined>();
   const abortRef = useRef<AbortController | null>(null);
   const [bg, setBg] = useState('https://source.unsplash.com/1600x900/?ai');
+  const profile: any = undefined;
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -67,6 +68,28 @@ export default function Home() {
     }
   }
 
+  const socialLinks = useMemo(() => {
+    const find = (pred: (u: URL) => boolean) =>
+      cites.find(c => {
+        try {
+          const u = new URL(c.url);
+          return pred(u);
+        } catch {
+          return false;
+        }
+      });
+    const byHost = (host: string) => find(u => u.hostname.endsWith(host));
+
+    const wiki = cites.find(c => c.url.includes('wikipedia.org')) ||
+      (profile?.wikiUrl ? { id: 'w', url: profile.wikiUrl, title: 'Wikipedia' } as any : undefined);
+    const linkedin = byHost('linkedin.com');
+    const insta = byHost('instagram.com');
+    const fb = byHost('facebook.com');
+    const x = find(u => u.hostname.endsWith('x.com') || u.hostname.endsWith('twitter.com'));
+
+    return { wiki, linkedin, insta, fb, x };
+  }, [cites, profile]);
+
   return (
     <main className="relative min-h-screen pb-40">
       <div className="absolute inset-x-0 top-0 h-1/2 -z-10 overflow-hidden">
@@ -81,6 +104,41 @@ export default function Home() {
 
         {confidence && (
           <div className="mt-2 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>
+        )}
+
+        {(socialLinks.wiki || socialLinks.linkedin || socialLinks.insta || socialLinks.fb || socialLinks.x) && (
+          <aside className="mt-6 grid gap-3 sm:grid-cols-2">
+            {socialLinks.wiki && (
+              <a className="block bg-white/5 p-3 rounded-xl" target="_blank" rel="noreferrer" href={socialLinks.wiki.url}>
+                <div className="text-xs opacity-70">Wikipedia</div>
+                <div className="font-semibold truncate">{socialLinks.wiki.title || 'Wikipedia'}</div>
+              </a>
+            )}
+            {socialLinks.linkedin && (
+              <a className="block bg-white/5 p-3 rounded-xl" target="_blank" rel="noreferrer" href={socialLinks.linkedin.url}>
+                <div className="text-xs opacity-70">LinkedIn</div>
+                <div className="font-semibold truncate">{socialLinks.linkedin.title || 'LinkedIn'}</div>
+              </a>
+            )}
+            {socialLinks.insta && (
+              <a className="block bg-white/5 p-3 rounded-xl" target="_blank" rel="noreferrer" href={socialLinks.insta.url}>
+                <div className="text-xs opacity-70">Instagram</div>
+                <div className="font-semibold truncate">{socialLinks.insta.title || 'Instagram'}</div>
+              </a>
+            )}
+            {socialLinks.fb && (
+              <a className="block bg-white/5 p-3 rounded-xl" target="_blank" rel="noreferrer" href={socialLinks.fb.url}>
+                <div className="text-xs opacity-70">Facebook</div>
+                <div className="font-semibold truncate">{socialLinks.fb.title || 'Facebook'}</div>
+              </a>
+            )}
+            {socialLinks.x && (
+              <a className="block bg-white/5 p-3 rounded-xl" target="_blank" rel="noreferrer" href={socialLinks.x.url}>
+                <div className="text-xs opacity-70">X</div>
+                <div className="font-semibold truncate">{socialLinks.x.title || 'X (Twitter)'}</div>
+              </a>
+            )}
+          </aside>
         )}
 
         {!!cites.length && (
