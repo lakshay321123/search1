@@ -1,25 +1,51 @@
-export type Socials = { website?: string; twitter?: string; x?: string; instagram?: string; facebook?: string; linkedin?: string; };
+type WD = { website?: string; linkedin?: string; instagram?: string; facebook?: string; x?: string; twitter?: string };
 
-export async function getWikidataSocials(name: string): Promise<Socials> {
+function wdUrl(id: string) { return `https://www.wikidata.org/wiki/${id}`; }
+
+export async function getWikidataSocials(label: string): Promise<WD> {
   try {
-    const q = new URL('https://www.wikidata.org/w/api.php');
-    q.searchParams.set('action','wbsearchentities'); q.searchParams.set('search',name);
-    q.searchParams.set('language','en'); q.searchParams.set('format','json'); q.searchParams.set('limit','1');
-    const r = await fetch(q, { cache: 'no-store' }); if (!r.ok) return {};
-    const j: any = await r.json(); const id = j?.search?.[0]?.id; if (!id) return {};
-    const g = new URL('https://www.wikidata.org/w/api.php');
-    g.searchParams.set('action','wbgetentities'); g.searchParams.set('ids',id);
-    g.searchParams.set('props','claims'); g.searchParams.set('format','json');
-    const rr = await fetch(g, { cache: 'no-store' }); if (!rr.ok) return {};
-    const jj: any = await rr.json(); const claims = jj?.entities?.[id]?.claims || {};
-    const val = (p: string) => claims[p]?.[0]?.mainsnak?.datavalue?.value;
-    const out: Socials = {};
-    const web = val('P856'); if (web) out.website = typeof web === 'string' ? web : web?.url;
-    const tw = val('P2002'); if (tw) { out.twitter = `https://twitter.com/${tw}`; out.x = `https://x.com/${tw}`; }
-    const ig = val('P2003'); if (ig) out.instagram = `https://instagram.com/${ig}`;
-    const fb = val('P2013'); if (fb) out.facebook = `https://facebook.com/${fb}`;
-    const liPerson = val('P6634'); if (liPerson) out.linkedin = String(liPerson).startsWith('http') ? String(liPerson) : `https://www.linkedin.com/in/${String(liPerson).replace(/^\/+/,'')}`;
-    const liOrg = val('P4264'); if (liOrg) out.linkedin = `https://www.linkedin.com/company/${liOrg}`;
+    // 1) find entity by label
+    const s = new URL('https://www.wikidata.org/w/api.php');
+    s.searchParams.set('action','wbsearchentities');
+    s.searchParams.set('search', label);
+    s.searchParams.set('language','en');
+    s.searchParams.set('format','json');
+    s.searchParams.set('limit','1');
+    s.searchParams.set('origin','*');
+    const sr = await fetch(s, { cache: 'no-store' });
+    const sj: any = await sr.json();
+    const id: string | undefined = sj?.search?.[0]?.id;
+    if (!id) return {};
+
+    // 2) fetch claims for socials
+    // P856 website, P2002 Twitter username, P2003 Instagram username, P2013 Facebook ID, P6634 LinkedIn ID
+    const d = new URL('https://www.wikidata.org/w/api.php');
+    d.searchParams.set('action','wbgetentities');
+    d.searchParams.set('ids', id);
+    d.searchParams.set('props','claims');
+    d.searchParams.set('format','json');
+    d.searchParams.set('origin','*');
+    const dr = await fetch(d, { cache: 'no-store' });
+    const dj: any = await dr.json();
+    const cl = dj?.entities?.[id]?.claims || {};
+
+    const getStr = (pid: string) => {
+      const v = cl[pid]?.[0]?.mainsnak?.datavalue?.value;
+      return typeof v === 'string' ? v : (v?.text || v?.id || '');
+    };
+
+    const website = getStr('P856');
+    const twitter = getStr('P2002'); // username
+    const instagram = getStr('P2003'); // username
+    const facebook = getStr('P2013'); // id/username
+    const linkedinId = getStr('P6634'); // LinkedIn ID
+
+    const out: WD = {};
+    if (website) out.website = website;
+    if (linkedinId) out.linkedin = `https://www.linkedin.com/in/${linkedinId}`;
+    if (instagram) out.instagram = `https://www.instagram.com/${instagram}`;
+    if (facebook) out.facebook = `https://www.facebook.com/${facebook}`;
+    if (twitter) out.x = `https://x.com/${twitter}`;
     return out;
   } catch { return {}; }
 }
