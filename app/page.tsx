@@ -59,6 +59,7 @@ export default function Home() {
         try {
           const evt = JSON.parse(json);
           if (evt.event === 'status') setStatus(evt.msg);
+          if (evt.event === 'error') setStatus(`error: ${evt.msg}`);
           if (evt.event === 'token') setAnswer(a => a + evt.text);
           if (evt.event === 'cite') setCites(c => [...c, evt.cite]);
           if (evt.event === 'final') setConfidence(evt.snapshot.confidence);
