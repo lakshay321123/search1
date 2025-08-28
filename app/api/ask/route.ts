@@ -21,19 +21,30 @@ export async function POST(req: Request) {
       const send = sse((s) => controller.enqueue(enc(s)));
       send({ event: 'status', msg: 'searching Wikipedia' });
       try {
-        const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(query)}`);
-        if (res.ok) {
-          const data = await res.json();
-          const text = data.extract || 'No summary available.';
-          const cite = { id: '1', url: data.content_urls?.desktop?.page || '', title: data.title };
-          send({ event: 'token', text });
-          send({ event: 'cite', cite });
-          send({
-            event: 'final',
-            snapshot: { id: rid(), markdown: text, cites: [cite], timeline: [], confidence: 'medium' }
-          });
-        } else {
+        const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&utf8=&format=json&origin=*`;
+        const searchRes = await fetch(searchUrl);
+        let title: string | undefined;
+        if (searchRes.ok) {
+          const searchData = await searchRes.json();
+          title = searchData?.query?.search?.[0]?.title;
+        }
+        if (!title) {
           send({ event: 'status', msg: 'no results found' });
+        } else {
+          const res = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`);
+          if (res.ok) {
+            const data = await res.json();
+            const text = data.extract || 'No summary available.';
+            const cite = { id: '1', url: data.content_urls?.desktop?.page || '', title: data.title };
+            send({ event: 'token', text });
+            send({ event: 'cite', cite });
+            send({
+              event: 'final',
+              snapshot: { id: rid(), markdown: text, cites: [cite], timeline: [], confidence: 'medium' }
+            });
+          } else {
+            send({ event: 'status', msg: 'no results found' });
+          }
         }
       } catch (err: any) {
         send({ event: 'status', msg: `error: ${err.message}` });
