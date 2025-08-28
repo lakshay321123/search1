@@ -21,6 +21,8 @@ export default function Home() {
   const [confidence, setConfidence] = useState<string|undefined>();
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController|null>(null);
+  const [voteSent, setVoteSent] = useState<null | 'up' | 'down'>(null);
+  const [downReason, setDownReason] = useState<string | null>(null);
 
   function resetAll() {
     setQuery(''); setSubject(undefined); setProfile(undefined); setCandidates([]); setRelated([]);
@@ -36,6 +38,7 @@ export default function Home() {
 
     setAnswer(''); setCites([]); setConfidence(undefined); setProfile(undefined);
     setCandidates([]); setRelated([]); setPlaces([]); setStatus('');
+    setVoteSent(null); setDownReason(null);
     abortRef.current?.abort();
 
     const ac = new AbortController(); abortRef.current = ac;
@@ -73,6 +76,29 @@ export default function Home() {
     }
     setBusy(false);
   }
+
+  async function sendFeedback(vote: 'up'|'down', reason?: string) {
+    if (voteSent) return;
+    try {
+      await fetch('/api/feedback', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+          query,
+          subject: profile?.title,
+          vote,
+          reason,
+          cites: cites.map(c => ({ url: c.url })),
+        })
+      });
+      setVoteSent(vote);
+    } catch {}
+  }
+
+  const onOpen = async (url: string) => {
+    try { await fetch('/api/click', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ url }) }); } catch {}
+    window.open(url, '_blank', 'noreferrer');
+  };
 
   const socialLinks = useMemo(() => {
     const find = (pred: (u: URL)=>boolean) =>
@@ -155,6 +181,36 @@ export default function Home() {
         <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
         {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
       </article>
+      <div className="mt-3 flex items-center gap-3 text-sm">
+        <button
+          onClick={() => sendFeedback('up')}
+          disabled={!!voteSent}
+          className={`px-3 py-1 rounded ${voteSent==='up' ? 'bg-green-600/40' : 'bg-white/10 hover:bg-white/20'}`}
+        >👍 Helpful</button>
+
+        <button
+          onClick={() => { setDownReason(null); sendFeedback('down'); }}
+          disabled={!!voteSent}
+          className={`px-3 py-1 rounded ${voteSent==='down' ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}
+        >👎 Not helpful</button>
+      </div>
+      {voteSent==='down' && (
+        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+          {[
+            ['wrong_person','Wrong person'],
+            ['outdated','Outdated info'],
+            ['low_quality','Low-quality sources'],
+            ['not_local','Not local'],
+            ['other','Other…'],
+          ].map(([key,label]) => (
+            <button key={key}
+              onClick={() => { setDownReason(key); sendFeedback('down', key); }}
+              className={`px-2 py-1 rounded ${downReason===key ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Places list for local */}
       {!!places.length && (
@@ -178,7 +234,7 @@ export default function Home() {
       {!!cites.length && (
         <aside className="mt-6 grid gap-3 sm:grid-cols-2">
           {cites.map(c => (
-            <a key={c.id} href={c.url} target="_blank" rel="noreferrer" className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition">
+            <a key={c.id} href={c.url} onClick={(e)=>{ e.preventDefault(); onOpen(c.url); }} className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition">
               <div className="flex items-center justify-between mb-1">
                 <div className="text-sm opacity-70">Source {c.id}</div>
                 <div className="text-[10px] px-2 py-0.5 rounded-full bg-white/10">
