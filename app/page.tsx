@@ -1,5 +1,6 @@
 'use client';
 import { useState, useRef, useMemo } from 'react';
+import { sanitizeHtml } from '../lib/sanitize';
 
 type Cite = { id: string; url: string; title: string; snippet?: string };
 type Profile = { title?: string; description?: string; extract?: string; image?: string; wikiUrl?: string };
@@ -80,7 +81,7 @@ export default function Home() {
   async function sendFeedback(vote: 'up'|'down', reason?: string) {
     if (voteSent) return;
     try {
-      await fetch('/api/feedback', {
+      const resp = await fetch('/api/feedback', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({
@@ -91,7 +92,9 @@ export default function Home() {
           cites: cites.map(c => ({ url: c.url })),
         })
       });
-      setVoteSent(vote);
+      if (resp.ok) {
+        setVoteSent(vote);
+      }
     } catch {}
   }
 
@@ -178,7 +181,7 @@ export default function Home() {
       {/* Streaming answer */}
       <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
         {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
-        <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
+        <div dangerouslySetInnerHTML={{ __html: sanitizeHtml((answer || '').replaceAll('\n','<br/>')) }} />
         {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
       </article>
       <div className="mt-3 flex items-center gap-3 text-sm">
