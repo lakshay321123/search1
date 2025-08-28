@@ -9,17 +9,17 @@
     "types": [
       "node"
     ],
-    "jsx": "preserve",
     "lib": [
       "dom",
       "dom.iterable",
       "esnext"
     ],
-    "noEmit": true,
     "allowJs": true,
+    "noEmit": true,
     "incremental": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "jsx": "preserve",
     "plugins": [
       {
         "name": "next"
@@ -28,9 +28,9 @@
   },
   "include": [
     "next-env.d.ts",
+    ".next/types/**/*.ts",
     "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts"
+    "**/*.tsx"
   ],
   "exclude": [
     "node_modules"

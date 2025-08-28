@@ -5,34 +5,43 @@ type Cite = { id: string; url: string; title: string; snippet?: string };
 type Profile = { title?: string; description?: string; extract?: string; image?: string; wikiUrl?: string };
 type Candidate = { title: string; description?: string; image?: string; url: string };
 type RelatedItem = { label: string; prompt: string };
+type Place = { id: string; name: string; type: string; address?: string; lat: number; lon: number; distance_m?: number; phone?: string; website?: string; osmUrl?: string };
 
 export default function Home() {
-  const [query, setQuery] = useState('Amit Shah');
+  const [query, setQuery] = useState('');            // empty by default
   const [subject, setSubject] = useState<string|undefined>();
+  const [coords, setCoords] = useState<{lat:number, lon:number}|undefined>();
   const [answer, setAnswer] = useState('');
   const [status, setStatus] = useState<string|undefined>();
   const [cites, setCites] = useState<Cite[]>([]);
   const [profile, setProfile] = useState<Profile|undefined>();
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [related, setRelated] = useState<RelatedItem[]>([]);
+  const [places, setPlaces] = useState<Place[]>([]);
   const [confidence, setConfidence] = useState<string|undefined>();
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController|null>(null);
+
+  function resetAll() {
+    setQuery(''); setSubject(undefined); setProfile(undefined); setCandidates([]); setRelated([]);
+    setCites([]); setAnswer(''); setPlaces([]); setConfidence(undefined); setStatus(undefined);
+  }
 
   async function ask(e?: React.FormEvent, qOverride?: string) {
     if (e) e.preventDefault();
     if (busy) return;
     setBusy(true);
-    const q = qOverride ?? query;
+    const q = (qOverride ?? query).trim();
+    if (!q) { setBusy(false); return; }
 
-    setAnswer(''); setCites([]); setConfidence(undefined);
-    setProfile(undefined); setCandidates([]); setRelated([]); setStatus('');
+    setAnswer(''); setCites([]); setConfidence(undefined); setProfile(undefined);
+    setCandidates([]); setRelated([]); setPlaces([]); setStatus('');
     abortRef.current?.abort();
 
     const ac = new AbortController(); abortRef.current = ac;
     const resp = await fetch('/api/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, subject }),
+      body: JSON.stringify({ query: q, subject, coords }),
       signal: ac.signal
     }).catch(() => undefined);
 
@@ -51,10 +60,12 @@ export default function Home() {
           const evt = JSON.parse(json);
           if (evt.event === 'status') setStatus(evt.msg);
           if (evt.event === 'token') setAnswer(a => a + evt.text);
-          if (evt.event === 'cite') setCites(c => c.some(x => x.url === evt.cite.url) ? c : [...c, evt.cite]);
+          if (evt.event === 'cite')
+            setCites(c => c.some(x => x.url === evt.cite.url) ? c : [...c, evt.cite]);
           if (evt.event === 'profile') { setProfile(evt.profile); if (evt.profile?.title) setSubject(evt.profile.title); }
           if (evt.event === 'candidates') setCandidates(evt.candidates || []);
           if (evt.event === 'related') setRelated(evt.items || []);
+          if (evt.event === 'places') setPlaces(evt.places || []);
           if (evt.event === 'error') setStatus(`error: ${evt.msg}`);
           if (evt.event === 'final') setConfidence(evt.snapshot.confidence);
         } catch {}
@@ -77,19 +88,34 @@ export default function Home() {
 
   return (
     <main className="max-w-3xl mx-auto p-4">
-      <h1 className="text-3xl font-bold mb-4">Wizkid</h1>
+      {/* Header with LOGO = HOME */}
+      <div className="flex items-center justify-between mb-4">
+        <button onClick={resetAll} className="text-3xl font-bold hover:opacity-80">Wizkid</button>
+        <button
+          onClick={() => navigator.geolocation?.getCurrentPosition(
+            pos => setCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+            () => setStatus('location denied')
+          )}
+          className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-sm"
+        >
+          {coords ? 'Location ✓' : 'Use my location'}
+        </button>
+      </div>
+
+      {/* Search bar */}
       <form onSubmit={ask} className="flex gap-2 mb-4">
         <input
           value={query}
           onChange={(e)=>setQuery(e.target.value)}
           className="flex-1 rounded-xl px-4 py-3 bg-white/10 outline-none"
-          placeholder="Ask about a person…"
+          placeholder="Ask anything… e.g., “doctor near me”, “Amit Shah”, “CLS Foods India Private Limited”"
         />
         <button className="px-5 py-3 rounded-xl bg-white/20 hover:bg-white/30 disabled:opacity-50" type="submit" disabled={busy}>
           {busy ? 'Asking…' : 'Ask'}
         </button>
       </form>
 
+      {/* Did you mean… */}
       {candidates.length > 0 && (
         <div className="mb-3">
           <div className="text-sm opacity-80 mb-1">Did you mean:</div>
@@ -105,6 +131,7 @@ export default function Home() {
         </div>
       )}
 
+      {/* Hero */}
       {(profile?.image || profile?.title) && (
         <section className="flex items-center gap-4 mb-2">
           {profile?.image && <img src={profile.image} alt={profile?.title || 'profile'} className="w-16 h-16 rounded-xl object-cover" />}
@@ -122,27 +149,32 @@ export default function Home() {
         </section>
       )}
 
+      {/* Streaming answer */}
       <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
         {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
         <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
         {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
       </article>
 
-      {related.length > 0 && (
-        <div className="mt-3">
-          <div className="text-sm opacity-80 mb-1">Related</div>
-          <div className="flex flex-wrap gap-2">
-            {related.map(r => (
-              <button key={r.prompt}
-                onClick={() => { setQuery(r.prompt); ask(undefined, r.prompt); }}
-                className="px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20">
-                {r.label}
-              </button>
+      {/* Places list for local */}
+      {!!places.length && (
+        <section className="mt-4">
+          <div className="text-sm opacity-80 mb-1">Nearby</div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {places.map(p => (
+              <a key={p.id} href={p.osmUrl} target="_blank" rel="noreferrer" className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition">
+                <div className="font-semibold">{p.name}</div>
+                <div className="text-xs opacity-80">{p.type}{p.address ? ` • ${p.address}` : ''}</div>
+                <div className="text-xs opacity-70 mt-1">
+                  {p.distance_m != null ? `${Math.round(p.distance_m/100)/10} km` : ''} {p.phone ? `• ${p.phone}` : ''} {p.website ? `• ${new URL(p.website).hostname}` : ''}
+                </div>
+              </a>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
+      {/* Sources */}
       {!!cites.length && (
         <aside className="mt-6 grid gap-3 sm:grid-cols-2">
           {cites.map(c => (
@@ -162,4 +194,3 @@ export default function Home() {
     </main>
   );
 }
-
