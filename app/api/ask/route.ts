@@ -8,6 +8,9 @@ import { discoverPeople } from '../../../lib/people/discover';
 import { getWikidataSocials } from '../../../lib/tools/wikidata';
 import { findSocialLinks, searchCSEMany } from '../../../lib/tools/googleCSE';
 import { searchNearbyOverpass } from '../../../lib/local/overpass';
+import { domainScore, recordShow } from '../../../lib/learn/domains';
+import { loadEntityBias } from '../../../lib/learn/entities';
+import { nameScore } from '../../../lib/text/similarity';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const sse = (write: (s: string) => void) => (o: any) => write(`data: ${JSON.stringify(o)}\n\n`);
@@ -20,6 +23,8 @@ type Req = { query: string; subject?: string; coords?: { lat: number, lon: numbe
 export async function POST(req: Request) {
   const body = await req.json() as Req;
   const { query, subject, coords, style = 'simple' } = body;
+  const workingQuery = query.trim();
+  const bias = await loadEntityBias(workingQuery);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -42,15 +47,27 @@ export async function POST(req: Request) {
         }
 
         // PEOPLE or COMPANY/GENERAL
-        const askFor = (subject && subject.trim()) || query.trim();
+        const askFor = (subject && subject.trim()) || workingQuery;
         let cites: Cite[] = [];
         const prelim: Cite[] = [];
         const push = (url?: string, title?: string, snippet?: string) => url && prelim.push({ id: String(prelim.length+1), url, title: title || url, snippet });
 
         // PEOPLE: discover + UI scaffolding
         if (intent === 'people') {
-          const { primary: top, others: alts } = await discoverPeople(askFor);
-          if (alts?.length) send({ event: 'candidates', candidates: alts.map(o => ({ title:o.name, description:o.description, image:o.image, url:o.wikiUrl }))});
+          const { primary: top0, others: alts0 } = await discoverPeople(askFor);
+          const all = [] as any[];
+          if (top0) all.push(top0);
+          if (alts0) all.push(...alts0);
+          for (const c of all) {
+            const pref = bias.prefer.get(c.name) || 0;
+            const av = bias.avoid.get(c.name) || 0;
+            const sim = nameScore(workingQuery, c.name);
+            c.fameScore = (c.fameScore || 0) + pref * 5000 + sim * 1000 - av * 7000;
+          }
+          all.sort((a,b)=>b.fameScore - a.fameScore);
+          const top = all[0];
+          const alts = all.slice(1,6);
+          if (alts.length) send({ event: 'candidates', candidates: alts.map(o => ({ title:o.name, description:o.description, image:o.image, url:o.wikiUrl }))});
           if (top) send({ event: 'profile', profile: { title: top.name, description: top.description, image: top.image, wikiUrl: top.wikiUrl } });
 
           const subjectName = top?.name || askFor;
@@ -87,7 +104,10 @@ export async function POST(req: Request) {
           web.forEach(r => push(r.url, r.title, r.snippet));
 
           const seen = new Set<string>(); for (const c of prelim) { const k = norm(c.url); if (!seen.has(k)) { seen.add(k); cites.push({ ...c, id: String(cites.length+1) }); } if (cites.length>=10) break; }
-          cites.forEach(c => send({ event: 'cite', cite: c }));
+          const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
+          scored.sort((a,b)=>b.s - a.s);
+          cites = scored.map(x=>x.c);
+          for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
 
           // Summarize (Gemini → fallback)
           const apiKey = process.env.GEMINI_API_KEY;
@@ -137,7 +157,11 @@ STRICT RULES:
 
           const seen = new Set<string>(); const cites: Cite[] = [];
           for (const c of prelim) { const k = norm(c.url); if (!seen.has(k)) { seen.add(k); cites.push({ ...c, id: String(cites.length+1) }); } if (cites.length>=10) break; }
-          cites.forEach(c => send({ event: 'cite', cite: c }));
+          const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
+          scored.sort((a,b)=>b.s - a.s);
+          const reordered = scored.map(x=>x.c);
+          for (const c of reordered) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
+          cites.splice(0, cites.length, ...reordered);
 
           // stream concise answer (Gemini → fallback from snippets)
           const apiKey = process.env.GEMINI_API_KEY;
