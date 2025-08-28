@@ -5,3 +5,4 @@ apps/frontend/.next/
 apps/frontend/next-env.d.ts
 *.log
 .env
+tsconfig.tsbuildinfo
