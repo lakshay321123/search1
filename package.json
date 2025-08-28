@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "build": "next build",
+    "build": "GEMINI_API_KEY=${GEMINI_API_KEY:-dummy} GOOGLE_CSE_ID=${GOOGLE_CSE_ID:-dummy} GOOGLE_CSE_KEY=${GOOGLE_CSE_KEY:-dummy} next build",
+    "typecheck": "tsc --noEmit",
     "start": "next start -p 3000"
   },
   "dependencies": {
@@ -16,6 +17,8 @@
   "devDependencies": {
     "typescript": "^5.5.4",
     "@types/node": "^20.12.12",
+    "@types/express": "^4.17.21",
+    "@types/cors": "^2.8.19",
     "@types/react": "^18.3.3",
     "tailwindcss": "^3.4.10",
     "postcss": "^8.4.41",
