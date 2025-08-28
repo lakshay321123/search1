@@ -1,255 +1,102 @@
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { Cite, Place } from '../../../lib/types';
-import { detectIntent } from '../../../lib/intent';
-import { discoverPeople } from '../../../lib/people/discover';
-import { getWikidataSocials } from '../../../lib/tools/wikidata';
-import { findSocialLinks, searchCSEMany } from '../../../lib/tools/googleCSE';
-import { searchNearbyOverpass } from '../../../lib/local/overpass';
-import { domainScore, recordShow } from '../../../lib/learn/domains';
-import { loadEntityBias } from '../../../lib/learn/entities';
-import { nameScore } from '../../../lib/text/similarity';
+import { planAndFetch } from '@/lib/think/orchestrator';
+import { getLLMStream } from '@/lib/llm/stream';
+import { relatedFor } from '@/lib/think/related';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const sse = (write: (s: string) => void) => (o: any) => write(`data: ${JSON.stringify(o)}\n\n`);
 const rid = () => (globalThis as any).crypto?.randomUUID?.() || Math.random().toString(36).slice(2);
-const norm = (u: string) => { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } };
-async function streamPlain(send:(o:any)=>void, text:string){ for (const ch of (text.match(/.{1,90}(\s|$)/g) || [text])) send({event:'token', text: ch}); }
 
-type Req = { query: string; subject?: string; coords?: { lat: number, lon: number }; style?: 'simple'|'expert' };
+type Req = { query: string; coords?: { lat:number, lon:number }; provider?: 'openai'|'gemini'|'auto' };
 
 export async function POST(req: Request) {
-  const body = await req.json() as Req;
-  const { query, subject, coords, style = 'simple' } = body;
-  const workingQuery = query.trim();
-  const bias = await loadEntityBias(workingQuery);
+  const { query, coords, provider='auto' } = await req.json() as Req;
 
   const stream = new ReadableStream({
     async start(controller) {
       const send = sse((s)=>controller.enqueue(enc(s)));
+
       try {
-        const intent = detectIntent(query);
-        // LOCAL MODE (doctor near me, etc.)
-        if (intent === 'local' && coords?.lat && coords?.lon) {
-          const { places, usedCategory } = await searchNearbyOverpass(query, coords.lat, coords.lon);
-          send({ event: 'status', msg: `local:${usedCategory || 'unknown'}` });
-          send({ event: 'places', places });
-          if (places.length) {
-            const line = `Top ${usedCategory || 'places'} near you: ${places.slice(0,5).map(p => `${p.name} (${Math.round((p.distance_m||0)/100)/10}km)`).join(', ')}. `;
-            await streamPlain(send, line);
-          } else {
-            await streamPlain(send, `I couldn’t find ${usedCategory || 'relevant'} results near you. Try expanding the radius or a different term.`);
-          }
-          send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites: [], timeline: [], confidence: places.length ? 'medium' : 'low' } });
+        if (!query?.trim()) {
+          send({ event:'final', snapshot:{ id: rid(), markdown:'(empty query)', cites:[], timeline:[], confidence:'low' }});
           controller.close(); return;
         }
 
-        // PEOPLE or COMPANY/GENERAL
-        const askFor = (subject && subject.trim()) || workingQuery;
-        let cites: Cite[] = [];
-        const prelim: Cite[] = [];
-        const push = (url?: string, title?: string, snippet?: string) => url && prelim.push({ id: String(prelim.length+1), url, title: title || url, snippet });
+        const plan = await planAndFetch(query, coords);
+        if (plan.candidates?.length) send({ event:'candidates', candidates: plan.candidates });
+        if (plan.status) send({ event:'status', msg: plan.status });
 
-        // PEOPLE: discover + UI scaffolding
-        if (intent === 'people') {
-          const { primary: top0, others: alts0 } = await discoverPeople(askFor);
-          const all = [] as any[];
-          if (top0) all.push(top0);
-          if (alts0) all.push(...alts0);
-          for (const c of all) {
-            const pref = bias.prefer.get(c.name) || 0;
-            const av = bias.avoid.get(c.name) || 0;
-            const sim = nameScore(workingQuery, c.name);
-            c.fameScore = (c.fameScore || 0) + pref * 5000 + sim * 1000 - av * 7000;
-          }
-          all.sort((a,b)=>b.fameScore - a.fameScore);
-          const top = all[0];
-          const alts = all.slice(1,6);
-          if (alts.length) send({ event: 'candidates', candidates: alts.map(o => ({ title:o.name, description:o.description, image:o.image, url:o.wikiUrl }))});
-          if (top) send({ event: 'profile', profile: { title: top.name, description: top.description, image: top.image, wikiUrl: top.wikiUrl } });
+        // Related suggestions (chips)
+        const subject = plan.profile?.title || plan.plan.subject || query.trim();
+        send({ event:'related', items: relatedFor(plan.plan.intent, subject) });
 
-          const subjectName = top?.name || askFor;
-          send({ event: 'related', items: [
-            { label: 'Main achievements', prompt: `What are ${subjectName}’s main achievements?` },
-            { label: 'Career timeline',   prompt: `Give a dated career timeline of ${subjectName}.` },
-            { label: 'Controversies',     prompt: `What controversies has ${subjectName} faced?` },
-            { label: 'Social profiles',   prompt: `List official social media profiles of ${subjectName}.` },
-            { label: 'Recent news',       prompt: `What’s the latest news about ${subjectName}?` },
-          ]});
-
-          // Official socials first, then web
-          const wd = await getWikidataSocials(subjectName);
-          const socialCSE = await findSocialLinks(subjectName);
-          const web = await searchCSEMany([
-            subjectName, `${subjectName} biography`, `${subjectName} achievements`,
-            `site:wikipedia.org ${subjectName}`, `site:linkedin.com ${subjectName}`,
-            `site:instagram.com ${subjectName}`, `site:facebook.com ${subjectName}`
-          ], 3);
-
-          if (wd.website) push(wd.website, 'Official website');
-          if (wd.linkedin) push(wd.linkedin, 'LinkedIn');
-          if (wd.instagram) push(wd.instagram, 'Instagram');
-          if (wd.facebook) push(wd.facebook, 'Facebook');
-          if (wd.x || wd.twitter) push(wd.x || wd.twitter, 'X (Twitter)');
-          if (top?.wikiUrl) push(top.wikiUrl, 'Wikipedia');
-
-          if (socialCSE.wiki?.url) push(socialCSE.wiki.url, 'Wikipedia');
-          if (socialCSE.linkedin?.url) push(socialCSE.linkedin.url, 'LinkedIn');
-          if (socialCSE.insta?.url) push(socialCSE.insta.url, 'Instagram');
-          if (socialCSE.fb?.url) push(socialCSE.fb.url, 'Facebook');
-          if (socialCSE.x?.url) push(socialCSE.x.url, 'X (Twitter)');
-
-          web.forEach(r => push(r.url, r.title, r.snippet));
-
-          const seen = new Set<string>(); for (const c of prelim) { const k = norm(c.url); if (!seen.has(k)) { seen.add(k); cites.push({ ...c, id: String(cites.length+1) }); } if (cites.length>=10) break; }
-          const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
-          scored.sort((a,b)=>b.s - a.s);
-          cites = scored.map(x=>x.c);
-
-          // Emit sources collected so far
-          for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
-
-          // If we have zero sources, broaden search so the LLM never sees empty "Numbered sources:"
-          if (!cites.length) {
-            send({ event: 'status', msg: 'No sources yet — broadening web search…' });
-            const { searchCSEMany } = await import('../../../lib/tools/googleCSE');
-            const broaden = await searchCSEMany(
-              [ subjectName, `${subjectName} site:wikipedia.org`, `${subjectName} site:linkedin.com`, `${subjectName} reviews`, `${subjectName} official` ],
-              3
-            );
-            for (const h of broaden) {
-              if (!cites.find(c => c.url === h.url)) {
-                const c = { id: String(cites.length + 1), ...h } as Cite;
-                cites.push(c);
-                await recordShow(c.url);
-                send({ event: 'cite', cite: c });
-              }
-              if (cites.length >= 10) break;
-            }
-          }
-
-          // Summarize (Gemini → fallback)
-          const apiKey = process.env.GEMINI_API_KEY;
-          let streamed = false; let quotaHit = false;
-          const sys = `You are Wizkid. Write a concise answer in <= 200 words with per-sentence [n] citations that refer to the numbered sources below. If no sources exist, say so briefly and suggest the next step.`;
-          const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const subj = subjectName;
-
-          let prompt: string;
-          if (cites.length) {
-            prompt = `${sys}\n\nSubject/Query: ${subj}\n\nNumbered sources:\n${sourceList}\n`;
-          } else {
-            prompt = `${sys}\n\nSubject/Query: ${subj}\n\n(No numbered sources available. Respond briefly, and suggest a refined query or ask for more context.)`;
-          }
-
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
-
-          if (apiKey) {
-            send({ event: 'status', msg: 'summarizing' });
-            try { await tryModel('gemini-1.5-flash-8b'); } catch (e:any) { quotaHit = /429|quota/i.test(String(e?.message||e||'')); }
-            if (!streamed && !quotaHit) { try { await tryModel('gemini-1.5-flash'); } catch (e2:any) { quotaHit ||= /429|quota/i.test(String(e2?.message||e2||'')); } }
-          }
-          if (!streamed) await streamPlain(send, `Here’s a short profile of ${subjectName} from the cited sources.\n`);
-
-          const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
-          send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites, timeline: [], confidence: conf } });
+        if (plan.plan?.needLocation) {
+          send({ event:'status', msg: 'Please allow location to search near you.' });
+          send({ event:'final', snapshot:{ id: rid(), markdown:'(need location)', cites:[], timeline:[], confidence:'low' } });
           controller.close(); return;
         }
 
-        // COMPANY / GENERAL: multi-query web + concise summary
-        {
-          const web = await searchCSEMany([
-            askFor, `${askFor} official site`, `${askFor} overview`, `${askFor} directors`, `${askFor} team`,
-            `site:wikipedia.org ${askFor}`, `site:linkedin.com ${askFor}`
-          ], 4);
-          const prelim: Cite[] = []; const push = (u?:string,t?:string,s?:string)=>u&&prelim.push({id:String(prelim.length+1),url:u,title:t||u,snippet:s});
-          web.forEach(r => push(r.url, r.title, r.snippet));
+        if (plan.profile) {
+          send({ event:'profile', profile: {
+            title: plan.profile.title,
+            description: plan.profile.description,
+            extract: plan.profile.extract,
+            image: plan.profile.image,
+            wikiUrl: plan.profile.pageUrl
+          }});
+        }
 
-          const seen = new Set<string>(); const cites: Cite[] = [];
-          for (const c of prelim) { const k = norm(c.url); if (!seen.has(k)) { seen.add(k); cites.push({ ...c, id: String(cites.length+1) }); } if (cites.length>=10) break; }
-          const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
-          scored.sort((a,b)=>b.s - a.s);
-          const reordered = scored.map(x=>x.c);
-          cites.splice(0, cites.length, ...reordered);
-
-          // Emit sources collected so far
-          for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
-
-          // If we have zero sources, broaden search so the LLM never sees empty "Numbered sources:"
-          if (!cites.length) {
-            send({ event: 'status', msg: 'No sources yet — broadening web search…' });
-            const { searchCSEMany } = await import('../../../lib/tools/googleCSE');
-            const broaden = await searchCSEMany(
-              [ askFor, `${askFor} site:wikipedia.org`, `${askFor} site:linkedin.com`, `${askFor} reviews`, `${askFor} official` ],
-              3
-            );
-            for (const h of broaden) {
-              if (!cites.find(c => c.url === h.url)) {
-                const c = { id: String(cites.length + 1), ...h } as Cite;
-                cites.push(c);
-                await recordShow(c.url);
-                send({ event: 'cite', cite: c });
-              }
-              if (cites.length >= 10) break;
-            }
-          }
-
-          // stream concise answer (Gemini → fallback from snippets)
-          const apiKey = process.env.GEMINI_API_KEY;
-          let streamed = false;
-          const sys = `You are Wizkid. Write a concise answer in <= 200 words with per-sentence [n] citations that refer to the numbered sources below. If no sources exist, say so briefly and suggest the next step.`;
-          const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const subj = askFor;
-
-          let prompt: string;
-          if (cites.length) {
-            prompt = `${sys}\n\nSubject/Query: ${subj}\n\nNumbered sources:\n${sourceList}\n`;
-          } else {
-            prompt = `${sys}\n\nSubject/Query: ${subj}\n\n(No numbered sources available. Respond briefly, and suggest a refined query or ask for more context.)`;
-          }
-
-          const tryModel = async (name: string) => {
-            const genAI = new GoogleGenerativeAI(apiKey!);
-            const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
-            const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
-            for await (const ev of (res as any).stream) {
-              const t = typeof (ev as any).text === 'function'
-                ? (ev as any).text()
-                : (ev as any)?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join('') || '';
-              if (t) { streamed = true; send({ event: 'token', text: t }); }
-            }
-          };
-
-          if (apiKey) { try { await tryModel('gemini-1.5-flash-8b'); } catch {} if (!streamed) { try { await tryModel('gemini-1.5-flash'); } catch {} } }
-          if (!streamed) {
-            // fallback: stitch snippets
-            const text = cites.slice(0,5).map((c,i)=>`${c.title} [${i+1}]: ${c.snippet || ''}`).join('\n');
-            await streamPlain(send, text || `I couldn’t generate a summary, but the sources above may help.`);
-          }
-
-          const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
-          send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites, timeline: [], confidence: conf } });
+        if (plan.places?.length) {
+          send({ event:'places', places: plan.places });
+          send({ event:'status', msg: `Found ${plan.places.length} places nearby.` });
+          send({ event:'final', snapshot:{ id: rid(), markdown:'(places)', cites:[], timeline:[], confidence: plan.places.length?'medium':'low' } });
           controller.close(); return;
         }
+
+        const cites = plan.cites || [];
+        for (const c of cites) send({ event:'cite', cite: c });
+
+        // If we have zero sources, broaden once so LLM never sees empty sources
+        if (!cites.length) {
+          send({ event:'status', msg:'No sources yet — broadening web search…' });
+          const { searchCSEMany } = await import('@/lib/tools/googleCSE');
+          const broaden = await searchCSEMany([ query, `${query} site:wikipedia.org`, `${query} site:linkedin.com`, `${query} reviews`, `${query} official` ], 3);
+          for (const h of broaden) {
+            if (!cites.find(c => c.url === h.url)) {
+              const c = { id: String(cites.length + 1), ...h };
+              cites.push(c); send({ event:'cite', cite: c });
+            }
+            if (cites.length >= 10) break;
+          }
+        }
+
+        const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
+        const subj = subject;
+        const sys = `You are Wizkid. Write a concise answer in <= 200 words with per-sentence [n] citations from the numbered sources. Avoid speculation.`;
+        const prompt = cites.length
+          ? `${sys}\n\nSubject/Query: ${subj}\n\nNumbered sources:\n${sourceList}\n`
+          : `${sys}\n\nSubject/Query: ${subj}\n\n(No numbered sources available. Respond in 2–4 sentences and suggest one refined query.)`;
+
+        const { streamText } = await getLLMStream(provider);
+        let any = false;
+        for await (const chunk of streamText(prompt)) {
+          any = true; send({ event:'token', text: chunk });
+        }
+        if (!any) send({ event:'token', text: cites[0]?.snippet || 'No sources found.' });
+
+        const conf = cites.length >= 3 ? 'high' : (cites.length ? 'medium' : 'low');
+        send({ event:'final', snapshot:{ id: rid(), markdown:'(streamed)', cites, timeline:[], confidence: conf } });
       } catch (e:any) {
         const msg = e?.message || String(e);
-        sse((s)=>controller.enqueue(enc(s)))({ event: 'error', msg });
-        sse((s)=>controller.enqueue(enc(s)))({ event: 'final', snapshot: { id: rid(), markdown: msg, cites: [], timeline: [], confidence: 'low' } });
-      } finally { controller.close(); }
+        send({ event:'error', msg });
+        send({ event:'final', snapshot:{ id: rid(), markdown: msg, cites:[], timeline:[], confidence:'low' } });
+      } finally {
+        controller.close();
+      }
     }
   });
 
-  return new Response(stream, { headers: { 'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive' } });
+  return new Response(stream, { headers: { 'Content-Type':'text/event-stream', 'Cache-Control':'no-cache, no-transform', 'Connection':'keep-alive' }});
 }
