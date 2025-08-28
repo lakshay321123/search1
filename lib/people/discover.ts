@@ -3,85 +3,75 @@ import { getWikidataSocials } from '../tools/wikidata';
 import { findSocialLinks, searchCSE } from '../tools/googleCSE';
 import { fetchOpenGraph } from '../tools/opengraph';
 import { wikiPageviews60d } from '../tools/pageviews';
+import { csePeopleCandidates } from './cseCandidates';
+import { isConfidentMatch, nameScore } from '../text/similarity';
 
 export type PersonCard = {
-  name: string;
-  description?: string;
-  wikiUrl?: string;
-  image?: string;
+  name: string; description?: string; wikiUrl?: string; image?: string;
   socials: { wiki?: string; linkedin?: string; instagram?: string; facebook?: string; x?: string; website?: string };
-  fameScore: number;
+  fameScore: number;  // for ranking only
 };
 
-function toCard(primary: WikiProfile | WikiCandidate): PersonCard {
-  return {
-    name: primary.title,
-    description: (primary as any).description,
-    wikiUrl: (primary as any).pageUrl,
-    image: (primary as any).image,
-    socials: {},
-    fameScore: 0
-  };
+function toCard(p: WikiProfile | WikiCandidate): PersonCard {
+  return { name: p.title, description: (p as any).description, wikiUrl: (p as any).pageUrl, image: (p as any).image, socials: {}, fameScore: 0 };
 }
 
-export async function discoverPeople(q: string) {
-  const { primary, others } = await wikiDisambiguate(q);
-  const base: PersonCard[] = [];
+/**
+ * Combine Wikipedia and CSE-derived person candidates.
+ * Rank by: name similarity (strong), + pageviews, + social presence.
+ * Only select a primary if the top candidate is a CONFIDENT match.
+ */
+export async function discoverPeople(query: string): Promise<{ primary: PersonCard | null; others: PersonCard[] }> {
+  const { primary, others } = await wikiDisambiguate(query);
+  const cards: PersonCard[] = [];
+  if (primary) cards.push(toCard(primary));
+  for (const o of others) cards.push(toCard(o));
 
-  if (primary) base.push(toCard(primary));
-  for (const o of others) base.push(toCard(o));
+  // Add CSE-based candidates (LinkedIn/IG/FB/X)
+  const cse = await csePeopleCandidates(query, 4);
+  for (const c of cse) {
+    // skip if same name+domain already present
+    if (cards.some(k => k.name.toLowerCase() === c.name.toLowerCase())) continue;
+    cards.push({ name: c.name, socials: { }, fameScore: 0, description: undefined, wikiUrl: undefined, image: c.image });
+  }
 
-  // Enrich each candidate: socials via Wikidata, then CSE fallback; OG image fallback; fame score
-  await Promise.all(base.map(async (c) => {
+  // Enrich & score
+  await Promise.all(cards.map(async (c) => {
+    // socials via Wikidata & CSE fallback
     const wd = await getWikidataSocials(c.name);
-    c.socials = {
-      website: wd.website,
-      linkedin: wd.linkedin,
-      instagram: wd.instagram,
-      facebook: wd.facebook,
-      x: wd.x || wd.twitter,
-      wiki: c.wikiUrl
-    };
+    c.socials = { website: wd.website, linkedin: wd.linkedin, instagram: wd.instagram, facebook: wd.facebook, x: wd.x || wd.twitter, wiki: c.wikiUrl };
 
-    // Fallback via CSE if Wikidata missing
-    if (!c.socials.linkedin || !c.socials.instagram || !c.socials.facebook || !c.socials.x) {
-      const socials = await findSocialLinks(c.name);
-      c.socials.linkedin ||= socials.linkedin?.url;
-      c.socials.instagram ||= socials.insta?.url;
-      c.socials.facebook ||= socials.fb?.url;
-      c.socials.x ||= socials.x?.url;
-      c.socials.wiki ||= socials.wiki?.url;
-    }
+    const socials = await findSocialLinks(c.name);
+    c.socials.linkedin ||= socials.linkedin?.url;
+    c.socials.instagram ||= socials.insta?.url;
+    c.socials.facebook ||= socials.fb?.url;
+    c.socials.x ||= socials.x?.url;
+    c.socials.wiki ||= socials.wiki?.url;
 
-    // Better image from OG if none from Wikipedia
-    if (!c.image && c.socials.linkedin) {
-      const og = await fetchOpenGraph(c.socials.linkedin);
-      c.image = og?.image || c.image;
-    }
-    if (!c.image && c.socials.instagram) {
-      const og = await fetchOpenGraph(c.socials.instagram);
-      c.image = og?.image || c.image;
-    }
+    // photo via OG if missing
+    if (!c.image && c.socials.linkedin) c.image = (await fetchOpenGraph(c.socials.linkedin))?.image || c.image;
+    if (!c.image && c.socials.instagram) c.image = (await fetchOpenGraph(c.socials.instagram))?.image || c.image;
 
-    // Fame score: recent pageviews + social presence + general web mentions
-    const pv = c.wikiUrl ? await wikiPageviews60d(new URL(c.wikiUrl).pathname.split('/').pop()!.replace(/_/g,' ')) : 0;
-    const socialWeight =
-      (c.socials.linkedin ? 3 : 0) +
-      (c.socials.instagram ? 2 : 0) +
-      (c.socials.facebook ? 1 : 0) +
-      (c.socials.x ? 2 : 0);
+    const pv = c.wikiUrl ? await wikiPageviews60d(new URL(c.wikiUrl).pathname.split('/').pop()!) : 0;
+    const socialW = (c.socials.linkedin?3:0)+(c.socials.instagram?2:0)+(c.socials.facebook?1:0)+(c.socials.x?2:0);
+    const pulse = (await searchCSE(`"${c.name}"`, 2)).length;
 
-    // quick web pulse (optional but cheap)
-    const pulse = (await searchCSE(`"${c.name}"`, 3)).length;
-
-    c.fameScore = pv * 1 + socialWeight * 100 + pulse * 50; // tune as you like
+    // Name similarity is the dominant factor
+    const sim = nameScore(query, c.name);
+    c.fameScore = sim*10000 + pv + socialW*100 + pulse*50;
   }));
 
-  // Rank most obvious person first
-  base.sort((a,b) => b.fameScore - a.fameScore);
+  // Rank by combined score
+  cards.sort((a,b)=>b.fameScore - a.fameScore);
 
-  return {
-    primary: base[0],
-    others: base.slice(1, 6) // show up to 5 more
-  };
+  // Decide primary
+  const top = cards[0];
+  const confident = top ? isConfidentMatch(query, top.name) : false;
+
+  if (!confident) {
+    // No auto-pick; return top 6 as candidates
+    return { primary: null, others: cards.slice(0, 6) };
+  }
+
+  return { primary: top, others: cards.filter(c => c !== top).slice(0, 6) };
 }

@@ -1,5 +1,6 @@
 'use client';
 import { useState, useRef, useMemo } from 'react';
+import Link from 'next/link';
 
 type Cite = { id: string; url: string; title: string; snippet?: string };
 type Profile = { title?: string; description?: string; extract?: string; image?: string; wikiUrl?: string };
@@ -7,7 +8,7 @@ type Candidate = { title: string; description?: string; image?: string; url: str
 type RelatedItem = { label: string; prompt: string };
 
 export default function Home() {
-  const [query, setQuery] = useState('Amit Shah');
+  const [query, setQuery] = useState('');
   const [subject, setSubject] = useState<string|undefined>();
   const [answer, setAnswer] = useState('');
   const [status, setStatus] = useState<string|undefined>();
@@ -77,7 +78,7 @@ export default function Home() {
 
   return (
     <main className="max-w-3xl mx-auto p-4">
-      <h1 className="text-3xl font-bold mb-4">Wizkid</h1>
+      <h1 className="text-3xl font-bold mb-4"><Link href="/">Wizkid</Link></h1>
       <form onSubmit={ask} className="flex gap-2 mb-4">
         <input
           value={query}
@@ -105,7 +106,13 @@ export default function Home() {
         </div>
       )}
 
-      {(profile?.image || profile?.title) && (
+      {!profile && candidates.length > 0 && (
+        <div className="mb-3 text-sm opacity-80">
+          Multiple matches found — please pick the right profile above.
+        </div>
+      )}
+
+      {profile && (
         <section className="flex items-center gap-4 mb-2">
           {profile?.image && <img src={profile.image} alt={profile?.title || 'profile'} className="w-16 h-16 rounded-xl object-cover" />}
           <div>
@@ -122,11 +129,13 @@ export default function Home() {
         </section>
       )}
 
-      <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
-        {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
-        <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
-        {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
-      </article>
+      {profile && (
+        <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
+          {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
+          <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
+          {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
+        </article>
+      )}
 
       {related.length > 0 && (
         <div className="mt-3">
@@ -162,4 +171,3 @@ export default function Home() {
     </main>
   );
 }
-

@@ -23,12 +23,23 @@ export async function POST(req: Request) {
         // 0) Subject lock
         const askFor = (subject && subject.trim()) || query.trim();
 
-        // 1) People discovery
+        // PEOPLE: discover + UI scaffolding
         const { primary: top, others: alts } = await discoverPeople(askFor);
-        if (alts?.length) send({ event: 'candidates', candidates: alts.map(o => ({ title:o.name, description:o.description, image:o.image, url:o.wikiUrl }))});
-        if (top) send({ event: 'profile', profile: { title: top.name, description: top.description, image: top.image, wikiUrl: top.wikiUrl } });
 
-        const subjectName = top?.name || askFor;
+        // Always show candidates if we have them
+        if (alts?.length) send({ event: 'candidates', candidates: alts.map(o => ({ title:o.name, description:o.description, image:o.image, url:o.wikiUrl }))});
+
+        // If we don't have a confident primary, ask user to pick and stop here
+        if (!top) {
+          await streamPlain(send, `I found multiple profiles matching “${askFor}”. Please pick the right one above.`);
+          send({ event: 'final', snapshot: { id: rid(), markdown: '(awaiting selection)', cites: [], timeline: [], confidence: 'low' } });
+          return;
+        }
+
+        // We have a confident primary
+        send({ event: 'profile', profile: { title: top.name, description: top.description, image: top.image, wikiUrl: top.wikiUrl } });
+
+        const subjectName = top.name;
         send({ event: 'related', items: [
           { label: 'Main achievements', prompt: `What are ${subjectName}’s main achievements?` },
           { label: 'Career timeline',   prompt: `Give a dated career timeline of ${subjectName}.` },
@@ -37,7 +48,10 @@ export async function POST(req: Request) {
           { label: 'Recent news',       prompt: `What’s the latest news about ${subjectName}?` },
         ]});
 
-        // 2) Build citations (official socials first, then web)
+        // Build citations (official socials first, then web)
+        const prelim: Cite[] = [];
+        const push = (url?: string, title?: string, snippet?: string) => url && prelim.push({ id: String(prelim.length+1), url, title: title || url, snippet });
+
         const wd = await getWikidataSocials(subjectName);
         const socialCSE = await findSocialLinks(subjectName);
         const web = await searchCSEMany([
@@ -46,15 +60,12 @@ export async function POST(req: Request) {
           `site:instagram.com ${subjectName}`, `site:facebook.com ${subjectName}`
         ], 3);
 
-        const prelim: Cite[] = [];
-        const push = (url?: string, title?: string, snippet?: string) => url && prelim.push({ id: String(prelim.length+1), url, title: title || url, snippet });
-
         if (wd.website) push(wd.website, 'Official website');
         if (wd.linkedin) push(wd.linkedin, 'LinkedIn');
         if (wd.instagram) push(wd.instagram, 'Instagram');
         if (wd.facebook) push(wd.facebook, 'Facebook');
         if (wd.x || wd.twitter) push(wd.x || wd.twitter, 'X (Twitter)');
-        if (top?.wikiUrl) push(top.wikiUrl, 'Wikipedia');
+        if (top.wikiUrl) push(top.wikiUrl, 'Wikipedia');
 
         if (socialCSE.wiki?.url) push(socialCSE.wiki.url, 'Wikipedia');
         if (socialCSE.linkedin?.url) push(socialCSE.linkedin.url, 'LinkedIn');
@@ -72,7 +83,7 @@ export async function POST(req: Request) {
         }
         cites.forEach(c => send({ event: 'cite', cite: c }));
 
-        // 3) Summarize (Gemini -> fallback)
+        // Summarize (Gemini -> stitched fallback)
         const apiKey = process.env.GEMINI_API_KEY;
         let streamed = false; let quotaHit = false;
 
@@ -86,9 +97,24 @@ STRICT RULES:
         const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
         const prompt = `${sys}\n\nSubject: ${subjectName}\n\nNumbered sources:\n${sourceList}\n`;
 
+        async function stitchedFallback() {
+          // Prefer Wikipedia extract if available
+          const wiki = cites.find(c => /wikipedia\.org/i.test(c.url));
+          if (wiki?.snippet) {
+            await streamPlain(send, `${wiki.snippet} [${cites.indexOf(wiki)+1}]\n`);
+            return;
+          }
+          // Otherwise stitch top snippets into 5–6 short sentences with [n]
+          const lines = cites.slice(0,6).map((c,i) => {
+            const s = (c.snippet || '').replace(/\s+/g,' ').trim();
+            return s ? `${s} [${i+1}].` : '';
+          }).filter(Boolean);
+          if (lines.length) await streamPlain(send, lines.join(' '));
+        }
+
         const tryModel = async (name: string) => {
           const genAI = new GoogleGenerativeAI(apiKey!);
-          const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] } as any);
+          const model = genAI.getGenerativeModel({ model: name, tools: [{ googleSearch: {} }] });
           const res = await model.generateContentStream({ contents: [{ role:'user', parts:[{ text: prompt }]}] });
           for await (const ev of (res as any).stream) {
             const t = typeof (ev as any).text === 'function'
@@ -102,19 +128,13 @@ STRICT RULES:
           send({ event: 'status', msg: 'summarizing' });
           try { await tryModel('gemini-1.5-flash-8b'); }
           catch (e:any) { quotaHit = /429|quota/i.test(String(e?.message||e||'')); }
-          if (!streamed && !quotaHit) {
-            try { await tryModel('gemini-1.5-flash'); } catch (e2:any) { quotaHit ||= /429|quota/i.test(String(e2?.message||e2||'')); }
-          }
+          if (!streamed && !quotaHit) { try { await tryModel('gemini-1.5-flash'); } catch(e2:any) { quotaHit ||= /429|quota/i.test(String(e2?.message||e2||'')); } }
         }
-
-        if (!streamed) {
-          const fallback = `A short profile of ${subjectName} based on the cited sources (especially Wikipedia).\n`;
-          send({ event: 'status', msg: quotaHit ? 'Using Wikipedia fallback (Gemini quota)' : 'Using Wikipedia fallback' });
-          await streamPlain(send, fallback);
-        }
+        if (!streamed) { await stitchedFallback(); }
 
         const conf = cites.length >= 3 ? 'high' : (cites.length >= 1 ? 'medium' : 'low');
         send({ event: 'final', snapshot: { id: rid(), markdown: '(streamed)', cites, timeline: [], confidence: conf } });
+        return;
       } catch (e:any) {
         send({ event: 'error', msg: e?.message || String(e) });
         send({ event: 'final', snapshot: { id: rid(), markdown: 'error', cites: [], timeline: [], confidence: 'low' } });
@@ -124,4 +144,3 @@ STRICT RULES:
 
   return new Response(stream, { headers: { 'Content-Type':'text/event-stream','Cache-Control':'no-cache, no-transform','Connection':'keep-alive' } });
 }
-

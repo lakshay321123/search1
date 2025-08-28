@@ -1,0 +1,41 @@
+export function normalizeName(s: string) {
+  return s
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function tokenSet(s: string): Set<string> {
+  return new Set(normalizeName(s).split(' ').filter(Boolean));
+}
+
+export function jaccard(a: Set<string>, b: Set<string>): number {
+  if (!a.size && !b.size) return 0;
+  let inter = 0;
+  for (const t of a) if (b.has(t)) inter++;
+  return inter / (a.size + b.size - inter || 1);
+}
+
+/**
+ * Simple name score:
+ * 1.0 for exact normalized equality
+ * otherwise 0..1 by Jaccard token overlap with small prefix bonus.
+ */
+export function nameScore(query: string, candidate: string): number {
+  const qn = normalizeName(query);
+  const cn = normalizeName(candidate);
+  if (!qn || !cn) return 0;
+  if (qn === cn) return 1;
+  const jq = jaccard(tokenSet(qn), tokenSet(cn));
+  const prefixBonus = cn.startsWith(qn) || qn.startsWith(cn) ? 0.15 : 0;
+  return Math.min(1, jq + prefixBonus);
+}
+
+/** Confident if exact or very high similarity. */
+export function isConfidentMatch(query: string, candidate: string) {
+  const s = nameScore(query, candidate);
+  return s >= 0.90;
+}
