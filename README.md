@@ -5,6 +5,16 @@ Single-repo **Next.js 14** app with:
 - Streaming UI that displays the answer and source cards
 - Tailwind styling
 
+## API
+
+`POST /api/ask` expects a JSON body like:
+
+```json
+{ "query": "What is Wizkid?", "style": "simple" }
+```
+
+The `style` field is optional and may be `simple` or `expert` (defaults to `simple`).
+
 ## Run locally
 ```bash
 cp .env.example .env # set SEARCH_API_KEY and LLM_API_KEY

@@ -4,6 +4,8 @@ export const dynamic = 'force-dynamic';
 
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+interface AskRequest { query: string; style?: 'simple' | 'expert'; }
+
 function enc(s: string) { return new TextEncoder().encode(s); }
 function sse(write: (s: string) => void) {
   return (o: any) => write(`data: ${JSON.stringify(o)}\n\n`);
@@ -14,7 +16,7 @@ function rid() {
 }
 
 export async function POST(req: Request) {
-  const { query, style = 'simple' } = await req.json();
+  const { query, style = 'simple' } = await req.json() as AskRequest;
 
   const searchKey = process.env.SEARCH_API_KEY;
   const llmKey = process.env.LLM_API_KEY;
