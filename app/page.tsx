@@ -1,7 +1,7 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
 
-type Cite = { id: string; url: string; title: string; snippet?: string; quote?: string; published_at?: string };
+type Cite = { id: string; url: string; title: string; snippet?: string; published_at?: string };
 type AskRequest = { query: string; style: 'simple' | 'expert' };
 
 export default function Home() {
@@ -86,11 +86,29 @@ export default function Home() {
         {!!cites.length && (
           <aside className="mt-6 grid gap-3 sm:grid-cols-2">
             {cites.map(c => (
-              <a key={c.id} href={c.url} target="_blank" rel="noreferrer" className="block bg-white/5 p-4 rounded-xl">
-                <div className="text-sm opacity-70">Source {c.id}</div>
+              <a
+                key={c.id}
+                href={c.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-sm opacity-70">Source {c.id}</div>
+                  <div className="text-[10px] px-2 py-0.5 rounded-full bg-white/10">
+                    {(() => {
+                      try {
+                        return new URL(c.url).hostname.replace(/^www\./, '');
+                      } catch {
+                        return '';
+                      }
+                    })()}
+                  </div>
+                </div>
                 <div className="font-semibold line-clamp-2">{c.title}</div>
-                {c.snippet && <div className="text-sm opacity-80 mt-1 line-clamp-3">{c.snippet}</div>}
-                {c.quote && <div className="text-xs opacity-70 mt-2 italic">“{c.quote}”</div>}
+                {c.snippet && (
+                  <div className="text-sm opacity-80 mt-1 line-clamp-3">{c.snippet}</div>
+                )}
               </a>
             ))}
           </aside>
