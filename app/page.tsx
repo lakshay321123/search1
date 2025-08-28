@@ -1,8 +1,9 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
+import type { Focus, Style } from '@/lib/types';
 
 type Cite = { id: string; url: string; title: string; snippet?: string; quote?: string; published_at?: string };
-type AskRequest = { query: string; style: 'simple' | 'expert' };
+type AskRequest = { query: string; style: Style; focus: Focus };
 
 export default function Home() {
   const [query, setQuery] = useState('');
@@ -12,6 +13,7 @@ export default function Home() {
   const [confidence, setConfidence] = useState<string | undefined>();
   const abortRef = useRef<AbortController | null>(null);
   const [bg, setBg] = useState('https://source.unsplash.com/1600x900/?ai');
+  const [focus, setFocus] = useState<Focus>('all');
 
   useEffect(() => {
     const id = setInterval(() => {
@@ -30,7 +32,7 @@ export default function Home() {
     const ac = new AbortController();
     abortRef.current = ac;
 
-    const payload: AskRequest = { query, style: 'simple' };
+    const payload: AskRequest = { query, style: 'simple', focus };
     const resp = await fetch('/api/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -98,6 +100,16 @@ export default function Home() {
       </div>
 
       <form onSubmit={ask} className="fixed bottom-8 left-1/2 -translate-x-1/2 flex gap-2 w-full max-w-xl px-4">
+        <select
+          className="rounded-xl bg-white/10 px-3"
+          value={focus}
+          onChange={(e) => setFocus(e.target.value as Focus)}
+        >
+          <option value="all">All</option>
+          <option value="web">Web</option>
+          <option value="wikipedia">Wikipedia</option>
+          <option value="social">Social</option>
+        </select>
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
