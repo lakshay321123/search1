@@ -2,7 +2,7 @@
 import type { SearchResult } from '../types';
 
 function domainOf(u: string) { try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; } }
-function normalize(u: string) { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } }
+function normalize(u: string) { try { const x=new URL(u); x.hash=''; return x.toString(); } catch { return u; } }
 
 export async function searchCSE(q: string, num = 6): Promise<SearchResult[]> {
   const key = process.env.GOOGLE_CSE_KEY, cx = process.env.GOOGLE_CSE_ID;
