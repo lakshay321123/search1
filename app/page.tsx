@@ -11,6 +11,7 @@ export default function Home() {
   const [query, setQuery] = useState('');            // empty by default
   const [subject, setSubject] = useState<string|undefined>();
   const [coords, setCoords] = useState<{lat:number, lon:number}|undefined>();
+  const [usingLocation] = useState(false);
   const [answer, setAnswer] = useState('');
   const [status, setStatus] = useState<string|undefined>();
   const [cites, setCites] = useState<Cite[]>([]);
@@ -42,9 +43,26 @@ export default function Home() {
     abortRef.current?.abort();
 
     const ac = new AbortController(); abortRef.current = ac;
+    const body:any = { query: q, subject };
+
+    // If user enabled location but we don't have coords yet, get them now (one-shot wait)
+    if (usingLocation && !coords && typeof navigator !== 'undefined' && navigator.geolocation) {
+      setStatus('Getting your location…');
+      try {
+        const pos = await new Promise<GeolocationPosition>((res, rej) =>
+          navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 })
+        );
+        body.coords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      } catch (err:any) {
+        setStatus(`Location error: ${err?.message || 'denied'}`);
+      }
+    } else if (usingLocation && coords) {
+      body.coords = coords;
+    }
+
     const resp = await fetch('/api/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, subject, coords }),
+      body: JSON.stringify(body),
       signal: ac.signal
     }).catch(() => undefined);
 

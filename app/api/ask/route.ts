@@ -107,20 +107,42 @@ export async function POST(req: Request) {
           const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
           scored.sort((a,b)=>b.s - a.s);
           cites = scored.map(x=>x.c);
+
+          // Emit sources collected so far
           for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
+
+          // If we have zero sources, broaden search so the LLM never sees empty "Numbered sources:"
+          if (!cites.length) {
+            send({ event: 'status', msg: 'No sources yet — broadening web search…' });
+            const { searchCSEMany } = await import('../../../lib/tools/googleCSE');
+            const broaden = await searchCSEMany(
+              [ subjectName, `${subjectName} site:wikipedia.org`, `${subjectName} site:linkedin.com`, `${subjectName} reviews`, `${subjectName} official` ],
+              3
+            );
+            for (const h of broaden) {
+              if (!cites.find(c => c.url === h.url)) {
+                const c = { id: String(cites.length + 1), ...h } as Cite;
+                cites.push(c);
+                await recordShow(c.url);
+                send({ event: 'cite', cite: c });
+              }
+              if (cites.length >= 10) break;
+            }
+          }
 
           // Summarize (Gemini → fallback)
           const apiKey = process.env.GEMINI_API_KEY;
           let streamed = false; let quotaHit = false;
-          const sys = `You are Wizkid, a citation-first assistant.
-Write a concise PERSON BIO in <= 200 words (6–10 sentences).
-STRICT RULES:
-- Use ONLY the numbered sources below. If a fact isn’t supported there, omit it.
-- After EACH sentence, include a [n] citation. No sentence without a citation.
-- Prefer dated facts and current titles. If dates conflict, omit the claim.
-- No meta commentary or speculation.`;
+          const sys = `You are Wizkid. Write a concise answer in <= 200 words with per-sentence [n] citations that refer to the numbered sources below. If no sources exist, say so briefly and suggest the next step.`;
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const prompt = `${sys}\n\nSubject: ${subjectName}\n\nNumbered sources:\n${sourceList}\n`;
+          const subj = subjectName;
+
+          let prompt: string;
+          if (cites.length) {
+            prompt = `${sys}\n\nSubject/Query: ${subj}\n\nNumbered sources:\n${sourceList}\n`;
+          } else {
+            prompt = `${sys}\n\nSubject/Query: ${subj}\n\n(No numbered sources available. Respond briefly, and suggest a refined query or ask for more context.)`;
+          }
 
           const tryModel = async (name: string) => {
             const genAI = new GoogleGenerativeAI(apiKey!);
@@ -160,16 +182,43 @@ STRICT RULES:
           const scored = await Promise.all(cites.map(async c => ({ c, s: await domainScore(c.url) })));
           scored.sort((a,b)=>b.s - a.s);
           const reordered = scored.map(x=>x.c);
-          for (const c of reordered) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
           cites.splice(0, cites.length, ...reordered);
+
+          // Emit sources collected so far
+          for (const c of cites) { await recordShow(c.url); send({ event: 'cite', cite: c }); }
+
+          // If we have zero sources, broaden search so the LLM never sees empty "Numbered sources:"
+          if (!cites.length) {
+            send({ event: 'status', msg: 'No sources yet — broadening web search…' });
+            const { searchCSEMany } = await import('../../../lib/tools/googleCSE');
+            const broaden = await searchCSEMany(
+              [ askFor, `${askFor} site:wikipedia.org`, `${askFor} site:linkedin.com`, `${askFor} reviews`, `${askFor} official` ],
+              3
+            );
+            for (const h of broaden) {
+              if (!cites.find(c => c.url === h.url)) {
+                const c = { id: String(cites.length + 1), ...h } as Cite;
+                cites.push(c);
+                await recordShow(c.url);
+                send({ event: 'cite', cite: c });
+              }
+              if (cites.length >= 10) break;
+            }
+          }
 
           // stream concise answer (Gemini → fallback from snippets)
           const apiKey = process.env.GEMINI_API_KEY;
           let streamed = false;
-          const sys = `You are Wizkid, a citation-first assistant.
-Write a concise answer in <= 180 words with per-sentence [n] citations referencing the numbered sources. Only use facts supported by sources. No meta commentary.`;
+          const sys = `You are Wizkid. Write a concise answer in <= 200 words with per-sentence [n] citations that refer to the numbered sources below. If no sources exist, say so briefly and suggest the next step.`;
           const sourceList = cites.map((c,i)=>`[${i+1}] ${c.title} — ${c.url}`).join('\n');
-          const prompt = `${sys}\n\nQuery: ${askFor}\n\nNumbered sources:\n${sourceList}\n`;
+          const subj = askFor;
+
+          let prompt: string;
+          if (cites.length) {
+            prompt = `${sys}\n\nSubject/Query: ${subj}\n\nNumbered sources:\n${sourceList}\n`;
+          } else {
+            prompt = `${sys}\n\nSubject/Query: ${subj}\n\n(No numbered sources available. Respond briefly, and suggest a refined query or ask for more context.)`;
+          }
 
           const tryModel = async (name: string) => {
             const genAI = new GoogleGenerativeAI(apiKey!);
