@@ -53,7 +53,7 @@ export async function searchNearbyOverpass(q: string, lat: number, lon: number, 
     const website = tags.website || tags['contact:website'];
     const phone = tags.phone || tags['contact:phone'];
     const dist = haversine(lat, lon, center.lat, center.lon);
-    out.push({ id: String(el.id), name, type: cat, address: addr || undefined, lat: center.lat, lon: center.lon, website, phone, distance_m: Math.round(dist), osmUrl: `https://www.openstreetmap.org/${el.type}/${el.id}` });
+    out.push({ id: String(el.id), name, address: addr || undefined, lat: center.lat, lon: center.lon, website, phone, distance_m: Math.round(dist), source: 'osm' });
   }
   out.sort((a,b)=> (a.distance_m||0) - (b.distance_m||0));
   return { places: out.slice(0, 12), usedCategory: cat };

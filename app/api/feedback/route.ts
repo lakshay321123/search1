@@ -1,30 +1,18 @@
-import { preferEntity, avoidEntity } from '../../../lib/learn/entities';
-import { recordShow } from '../../../lib/learn/domains';
+import { Redis } from '@upstash/redis';
 
 export async function POST(req: Request) {
   try {
-    const body = await req.json() as {
-      query: string;
-      subject?: string;
-      vote: 'up' | 'down';
-      reason?: 'wrong_person' | 'outdated' | 'low_quality' | 'not_local' | 'other';
-      cites?: { url: string }[];
-      comment?: string;
-    };
-
-    if (body.vote === 'up' && body.subject) {
-      await preferEntity(body.query, body.subject, 1);
+    const body = await req.json() as { query: string; helpful: boolean };
+    if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+      const redis = new Redis({
+        url: process.env.UPSTASH_REDIS_REST_URL,
+        token: process.env.UPSTASH_REDIS_REST_TOKEN,
+      });
+      await redis.lpush('feedback', JSON.stringify({ ...body, ts: Date.now() }));
+      console.log('stored: redis');
+    } else {
+      console.log('stored:', body);
     }
-    if (body.vote === 'down') {
-      if (body.reason === 'wrong_person' && body.subject) {
-        await avoidEntity(body.query, body.subject, 2);
-      }
-    }
-
-    if (body.cites?.length) {
-      await Promise.all(body.cites.map(c => recordShow(c.url)));
-    }
-
     return Response.json({ ok: true });
   } catch (e) {
     return Response.json({ ok: false }, { status: 200 });
