@@ -17,7 +17,7 @@ The `style` field is optional and may be `simple` or `expert` (defaults to `simp
 
 ## Run locally
 ```bash
-cp .env.example .env # set GEMINI_API_KEY, GOOGLE_CSE_ID, and GOOGLE_CSE_KEY
+cp .env.example .env # set GEMINI_API_KEY, GOOGLE_CSE_ID, GOOGLE_CSE_KEY, SEARCH_API_KEY, and LLM_API_KEY
 npm install
 npm run dev
 # open http://localhost:3000
