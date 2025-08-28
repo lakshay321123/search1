@@ -1,63 +1,49 @@
 'use client';
-import { useState, useRef } from 'react';
+import { useState, useRef, useMemo } from 'react';
 
-import type { Cite } from '../lib/types';
-
-type Candidate = { title: string; description?: string; image?: string; url?: string };
-type Profile = { title: string; description?: string; image?: string; wikiUrl?: string; socials?: Record<string, string | undefined> };
-type Related = { label: string; prompt: string };
+type Cite = { id: string; url: string; title: string; snippet?: string };
+type Profile = { title?: string; description?: string; extract?: string; image?: string; wikiUrl?: string };
+type Candidate = { title: string; description?: string; image?: string; url: string };
+type RelatedItem = { label: string; prompt: string };
 
 export default function Home() {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState('Amit Shah');
+  const [subject, setSubject] = useState<string|undefined>();
   const [answer, setAnswer] = useState('');
-  const [status, setStatus] = useState<string | undefined>();
+  const [status, setStatus] = useState<string|undefined>();
   const [cites, setCites] = useState<Cite[]>([]);
-  const [confidence, setConfidence] = useState<string | undefined>();
+  const [profile, setProfile] = useState<Profile|undefined>();
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [related, setRelated] = useState<Related[]>([]);
-  const [loading, setLoading] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [related, setRelated] = useState<RelatedItem[]>([]);
+  const [confidence, setConfidence] = useState<string|undefined>();
+  const [busy, setBusy] = useState(false);
+  const abortRef = useRef<AbortController|null>(null);
 
-  async function ask(e?: React.FormEvent, override?: string) {
-    e?.preventDefault();
-    const q = override ?? query;
-    setQuery(q);
-    setAnswer('');
-    setCites([]);
-    setConfidence(undefined);
-    setStatus('');
-    setCandidates([]);
-    setProfile(null);
-    setRelated([]);
-    setLoading(true);
+  async function ask(e?: React.FormEvent, qOverride?: string) {
+    if (e) e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    const q = qOverride ?? query;
+
+    setAnswer(''); setCites([]); setConfidence(undefined);
+    setProfile(undefined); setCandidates([]); setRelated([]); setStatus('');
     abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
 
+    const ac = new AbortController(); abortRef.current = ac;
     const resp = await fetch('/api/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q }),
-      signal: ac.signal,
-    });
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query: q, subject }),
+      signal: ac.signal
+    }).catch(() => undefined);
 
-    if (!resp.ok || !resp.body) {
-      setStatus('error');
-      setLoading(false);
-      return;
-    }
+    if (!resp?.ok || !resp.body) { setStatus('error'); setBusy(false); return; }
 
     const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
+    const decoder = new TextDecoder(); let buffer = '';
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await reader.read(); if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
+      const parts = buffer.split('\n\n'); buffer = parts.pop() || '';
       for (const chunk of parts) {
         if (!chunk.startsWith('data:')) continue;
         const json = chunk.slice(5).trim();
@@ -65,90 +51,102 @@ export default function Home() {
           const evt = JSON.parse(json);
           if (evt.event === 'status') setStatus(evt.msg);
           if (evt.event === 'token') setAnswer(a => a + evt.text);
-          if (evt.event === 'cite') setCites(c => [...c, evt.cite]);
-          if (evt.event === 'final') { setConfidence(evt.snapshot.confidence); setLoading(false); }
-          if (evt.event === 'error') { setStatus('error'); setLoading(false); }
-          if (evt.event === 'candidates') setCandidates(evt.candidates);
-          if (evt.event === 'profile') setProfile(evt.profile);
-          if (evt.event === 'related') setRelated(evt.items);
-        } catch { /* noop */ }
+          if (evt.event === 'cite') setCites(c => c.some(x => x.url === evt.cite.url) ? c : [...c, evt.cite]);
+          if (evt.event === 'profile') { setProfile(evt.profile); if (evt.profile?.title) setSubject(evt.profile.title); }
+          if (evt.event === 'candidates') setCandidates(evt.candidates || []);
+          if (evt.event === 'related') setRelated(evt.items || []);
+          if (evt.event === 'error') setStatus(`error: ${evt.msg}`);
+          if (evt.event === 'final') setConfidence(evt.snapshot.confidence);
+        } catch {}
       }
     }
+    setBusy(false);
   }
 
-  const askWith = (q: string) => ask(undefined, q);
+  const socialLinks = useMemo(() => {
+    const find = (pred: (u: URL)=>boolean) =>
+      cites.find(c => { try { const u = new URL(c.url); return pred(u); } catch { return false; } });
+    const byHost = (host: string) => find(u => u.hostname.endsWith(host));
+    const wiki = cites.find(c => c.url.includes('wikipedia.org')) || (profile?.wikiUrl ? { id:'w', url:profile.wikiUrl, title:'Wikipedia' } as any : undefined);
+    const linkedin = byHost('linkedin.com');
+    const insta = byHost('instagram.com');
+    const fb = byHost('facebook.com');
+    const x = find(u => u.hostname.endsWith('x.com') || u.hostname.endsWith('twitter.com'));
+    return { wiki, linkedin, insta, fb, x };
+  }, [cites, profile]);
 
   return (
-    <main className="max-w-4xl mx-auto px-4 pt-4 pb-40">
-      <form onSubmit={e => ask(e)} className="flex gap-2 mb-4">
+    <main className="max-w-3xl mx-auto p-4">
+      <h1 className="text-3xl font-bold mb-4">Wizkid</h1>
+      <form onSubmit={ask} className="flex gap-2 mb-4">
         <input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e)=>setQuery(e.target.value)}
           className="flex-1 rounded-xl px-4 py-3 bg-white/10 outline-none"
-          placeholder="Search people..."
-          disabled={loading}
+          placeholder="Ask about a person…"
         />
-        <button className="px-5 py-3 rounded-xl bg-white/20 hover:bg-white/30 disabled:opacity-50" type="submit" disabled={loading}>
-          Ask
+        <button className="px-5 py-3 rounded-xl bg-white/20 hover:bg-white/30 disabled:opacity-50" type="submit" disabled={busy}>
+          {busy ? 'Asking…' : 'Ask'}
         </button>
       </form>
 
       {candidates.length > 0 && (
-        <div className="mb-4 flex flex-wrap gap-2">
-          {candidates.map(c => (
-            <button key={c.title} onClick={() => askWith(c.title)} className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 text-sm">
-              {c.title}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {profile && (
-        <div className="mb-4 flex items-center gap-4">
-          {profile.image && <img src={profile.image} alt={profile.title} className="w-24 h-24 rounded-full object-cover" />}
-          <div>
-            <div className="text-xl font-semibold">{profile.title}</div>
-            {profile.description && <div className="text-sm opacity-80">{profile.description}</div>}
-            {profile.socials && (
-              <div className="flex gap-2 mt-2 flex-wrap">
-                {profile.socials.wiki && <a className="text-xs px-2 py-1 rounded bg-white/10" href={profile.socials.wiki} target="_blank">Wiki</a>}
-                {profile.socials.linkedin && <a className="text-xs px-2 py-1 rounded bg-white/10" href={profile.socials.linkedin} target="_blank">LinkedIn</a>}
-                {profile.socials.instagram && <a className="text-xs px-2 py-1 rounded bg-white/10" href={profile.socials.instagram} target="_blank">Instagram</a>}
-                {profile.socials.facebook && <a className="text-xs px-2 py-1 rounded bg-white/10" href={profile.socials.facebook} target="_blank">Facebook</a>}
-                {profile.socials.x && <a className="text-xs px-2 py-1 rounded bg-white/10" href={profile.socials.x} target="_blank">X</a>}
-              </div>
-            )}
+        <div className="mb-3">
+          <div className="text-sm opacity-80 mb-1">Did you mean:</div>
+          <div className="flex flex-wrap gap-2">
+            {candidates.map(c => (
+              <button key={c.title}
+                onClick={() => { setQuery(c.title); setSubject(c.title); ask(undefined, c.title); }}
+                className="px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20">
+                {c.title}
+              </button>
+            ))}
           </div>
         </div>
       )}
 
-      <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[120px]">
-        <div dangerouslySetInnerHTML={{ __html: answer.split('\n').join('<br/>') }} />
-      </article>
-      {confidence && (
-        <div className="mt-2 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>
+      {(profile?.image || profile?.title) && (
+        <section className="flex items-center gap-4 mb-2">
+          {profile?.image && <img src={profile.image} alt={profile?.title || 'profile'} className="w-16 h-16 rounded-xl object-cover" />}
+          <div>
+            <div className="text-xl font-semibold">{profile?.title || subject || query}</div>
+            {profile?.description && <div className="text-sm opacity-80">{profile.description}</div>}
+            <div className="flex gap-2 mt-1 text-xs">
+              {socialLinks.wiki && <a className="px-2 py-1 bg-white/10 rounded" href={socialLinks.wiki.url} target="_blank" rel="noreferrer">Wiki</a>}
+              {socialLinks.linkedin && <a className="px-2 py-1 bg-white/10 rounded" href={socialLinks.linkedin.url} target="_blank" rel="noreferrer">LinkedIn</a>}
+              {socialLinks.insta && <a className="px-2 py-1 bg-white/10 rounded" href={socialLinks.insta.url} target="_blank" rel="noreferrer">Instagram</a>}
+              {socialLinks.fb && <a className="px-2 py-1 bg-white/10 rounded" href={socialLinks.fb.url} target="_blank" rel="noreferrer">Facebook</a>}
+              {socialLinks.x && <a className="px-2 py-1 bg-white/10 rounded" href={socialLinks.x.url} target="_blank" rel="noreferrer">X</a>}
+            </div>
+          </div>
+        </section>
       )}
 
+      <article className="prose prose-invert max-w-none bg-white/5 p-4 rounded-2xl min-h-[140px]">
+        {status && <div className="text-xs opacity-70 mb-2">{status}</div>}
+        <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
+        {confidence && <div className="mt-3 text-sm">Confidence: <span className="font-semibold">{confidence}</span></div>}
+      </article>
+
       {related.length > 0 && (
-        <div className="mt-4 flex flex-wrap gap-2">
-          {related.map(r => (
-            <button key={r.prompt} onClick={() => askWith(r.prompt)} className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/20 text-sm">
-              {r.label}
-            </button>
-          ))}
+        <div className="mt-3">
+          <div className="text-sm opacity-80 mb-1">Related</div>
+          <div className="flex flex-wrap gap-2">
+            {related.map(r => (
+              <button key={r.prompt}
+                onClick={() => { setQuery(r.prompt); ask(undefined, r.prompt); }}
+                className="px-3 py-2 bg-white/10 rounded-xl hover:bg-white/20">
+                {r.label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
       {!!cites.length && (
         <aside className="mt-6 grid gap-3 sm:grid-cols-2">
           {cites.map(c => (
-            <a
-              key={c.id}
-              href={c.url}
-              target="_blank"
-              rel="noreferrer"
-              className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition"
-            >
+            <a key={c.id} href={c.url} target="_blank" rel="noreferrer" className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition">
               <div className="flex items-center justify-between mb-1">
                 <div className="text-sm opacity-70">Source {c.id}</div>
                 <div className="text-[10px] px-2 py-0.5 rounded-full bg-white/10">
@@ -156,15 +154,12 @@ export default function Home() {
                 </div>
               </div>
               <div className="font-semibold line-clamp-2">{c.title}</div>
-              {c.snippet && (
-                <div className="text-sm opacity-80 mt-1 line-clamp-3">{c.snippet}</div>
-              )}
+              {c.snippet && <div className="text-sm opacity-80 mt-1 line-clamp-3">{c.snippet}</div>}
             </a>
           ))}
         </aside>
       )}
-
-      {status && <div className="mt-4 text-sm opacity-70">{status}</div>}
     </main>
   );
 }
+
