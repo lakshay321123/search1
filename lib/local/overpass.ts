@@ -14,7 +14,7 @@ const CATS: Record<string, { key: string; values: string[] }> = {
 function detectCategory(q: string): keyof typeof CATS | null {
   const s = q.toLowerCase();
   for (const k of Object.keys(CATS)) if (s.includes(k)) return k as any;
-  if (/doctor|clinic|gp|physician/.test(s)) return 'doctor';
+  if (/doctor|doctors|clinic|gp|physician/.test(s)) return 'doctor';
   if (/dentist/.test(s)) return 'dentist';
   if (/hospital/.test(s)) return 'hospital';
   if (/pharmacy|chemist/.test(s)) return 'pharmacy';
@@ -32,16 +32,34 @@ function haversine(lat1:number, lon1:number, lat2:number, lon2:number) {
   return 2*R*Math.asin(Math.sqrt(a));
 }
 
-export async function searchNearbyOverpass(q: string, lat: number, lon: number, radiusMeters = 4000): Promise<{ places: Place[], usedCategory: string | null }> {
+export async function searchNearbyOverpass(q: string, lat: number, lon: number, radiusMeters = 6000): Promise<{ places: Place[], usedCategory: string | null }> {
   const cat = detectCategory(q);
   if (!cat) return { places: [], usedCategory: null };
   const tag = CATS[cat];
-  // Overpass QL
-  const around = `around:${Math.max(500, Math.min(10000, radiusMeters))},${lat},${lon}`;
-  const clauses = tag.values.map(v => `node[${tag.key}=${v}](${around});way[${tag.key}=${v}](${around});relation[${tag.key}=${v}](${around});`).join('\n');
-  const ql = `[out:json][timeout:25];(${clauses});out center tags 40;`;
-  const r = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: ql, headers: { 'Content-Type': 'text/plain' }, cache: 'no-store' });
-  if (!r.ok) return { places: [], usedCategory: cat };
+
+  const tryOne = async (endpoint: string) => {
+    const around = `around:${Math.max(800, Math.min(15000, radiusMeters))},${lat},${lon}`;
+    const clauses = tag.values.map(v =>
+      `node[${tag.key}=${v}](${around});way[${tag.key}=${v}](${around});relation[${tag.key}=${v}](${around});`
+    ).join('\n');
+    const ql = `[out:json][timeout:25];(${clauses});out center tags 80;`;
+    return fetch(endpoint, { method: 'POST', body: ql, headers: { 'Content-Type': 'text/plain' }, cache: 'no-store' });
+  };
+
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter'
+  ];
+
+  let r: Response | null = null;
+  for (const ep of endpoints) {
+    try {
+      const rr = await tryOne(ep);
+      if (rr.ok) { r = rr; break; }
+    } catch {}
+  }
+  if (!r) return { places: [], usedCategory: cat };
+
   const j: any = await r.json();
   const out: Place[] = [];
   for (const el of j.elements || []) {
@@ -53,7 +71,16 @@ export async function searchNearbyOverpass(q: string, lat: number, lon: number, 
     const website = tags.website || tags['contact:website'];
     const phone = tags.phone || tags['contact:phone'];
     const dist = haversine(lat, lon, center.lat, center.lon);
-    out.push({ id: String(el.id), name, type: cat, address: addr || undefined, lat: center.lat, lon: center.lon, website, phone, distance_m: Math.round(dist), osmUrl: `https://www.openstreetmap.org/${el.type}/${el.id}` });
+    out.push({
+      id: String(el.id),
+      name,
+      type: cat,
+      address: addr || undefined,
+      lat: center.lat, lon: center.lon,
+      website, phone,
+      distance_m: Math.round(dist),
+      osmUrl: `https://www.openstreetmap.org/${el.type}/${el.id}`
+    });
   }
   out.sort((a,b)=> (a.distance_m||0) - (b.distance_m||0));
   return { places: out.slice(0, 12), usedCategory: cat };
