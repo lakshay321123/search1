@@ -1,5 +1,4 @@
 import type { SearchResult } from '../../lib/types';
-
 function domainOf(u: string) { try { return new URL(u).hostname.replace(/^www\./,''); } catch { return ''; } }
 function norm(u: string) { try { const x=new URL(u); x.hash=''; x.search=''; return x.toString(); } catch { return u; } }
 
@@ -42,22 +41,14 @@ export async function findSocialLinks(name: string) {
   ];
   const flat = (await Promise.all(queries.map(q => searchCSE(q, 4)))).flat();
   const byHost = (host: string) => flat.find(r => (r.domain || '').endsWith(host));
-  // Prefer /in/ profiles on LinkedIn
   const linkedin = flat
     .filter(r => (r.domain || '').endsWith('linkedin.com'))
     .sort((a,b) => scoreLinkedIn(b.url, person) - scoreLinkedIn(a.url, person))[0];
-  return {
-    wiki: byHost('wikipedia.org'),
-    linkedin,
-    insta: byHost('instagram.com'),
-    fb: byHost('facebook.com'),
-    x: byHost('x.com') || byHost('twitter.com'),
-    all: flat
-  };
+  return { wiki: byHost('wikipedia.org'), linkedin, insta: byHost('instagram.com'), fb: byHost('facebook.com'),
+           x: byHost('x.com') || byHost('twitter.com'), all: flat };
 }
 
 function scoreLinkedIn(url: string, name: string) {
   const u = url.toLowerCase(), n = name.toLowerCase().replace(/\s+/g,'');
   return (u.includes('/in/') ? 5 : 0) + (u.includes('/company/') ? 2 : 0) + (u.includes(n) ? 2 : 0) + 1;
 }
-
