@@ -7,6 +7,7 @@ Single-repo **Next.js 14** app with:
 
 ## Run locally
 ```bash
+cp .env.example .env # set SEARCH_API_KEY and LLM_API_KEY
 npm install
 npm run dev
 # open http://localhost:3000

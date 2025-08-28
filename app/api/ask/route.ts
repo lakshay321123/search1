@@ -16,6 +16,15 @@ function rid() {
 export async function POST(req: Request) {
   const { query, style = 'simple' } = await req.json();
 
+  const searchKey = process.env.SEARCH_API_KEY;
+  const llmKey = process.env.LLM_API_KEY;
+  if (!searchKey) {
+    return new Response('Missing SEARCH_API_KEY in environment', { status: 500 });
+  }
+  if (!llmKey) {
+    return new Response('Missing LLM_API_KEY in environment', { status: 500 });
+  }
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = sse((s) => controller.enqueue(enc(s)));
