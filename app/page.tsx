@@ -137,7 +137,7 @@ export default function Home() {
       {/* Streaming answer */}
       <article style={cardStyle}>
         {status && <div style={{opacity:0.7, fontSize:12, marginBottom:8}}>{status}</div>}
-        <div dangerouslySetInnerHTML={{ __html: (answer || '').replaceAll('\n','<br/>') }} />
+          <div dangerouslySetInnerHTML={{ __html: (answer || '').replace(/\n/g,'<br/>') }} />
         {confidence && (
           <div style={{marginTop:10, fontSize:14}}>
             Confidence: <b>{confidence}</b>
