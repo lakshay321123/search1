@@ -53,17 +53,24 @@ export async function POST(req: Request) {
 Use inline [n] citations; prefer official/primary sources.
 Style: ${style === 'expert' ? 'Expert (lawyer-grade)' : 'Simple'}.`;
 
-      const result = await model.generateContentStream({
-        contents: [{ role: 'user', parts: [{ text: `${sys}\n\nQuestion: ${query}` }] }]
-      });
+      let result: any;
+      try {
+        result = await model.generateContentStream({
+          contents: [{ role: 'user', parts: [{ text: `${sys}\n\nQuestion: ${query}` }] }]
+        });
 
-      let finalResponse: any = null;
+        let finalResponse: any = null;
 
-      for await (const event of result.stream) {
-        // Each event can be turned into text
-        const text = (event as any).text?.();
-        if (text) send({ event: 'token', text });
-        finalResponse = event; // keep last for metadata
+        for await (const event of result.stream) {
+          // Each event can be turned into text
+          const text = (event as any).text?.();
+          if (text) send({ event: 'token', text });
+          finalResponse = event; // keep last for metadata
+        }
+      } catch (err: any) {
+        send({ event: 'status', msg: `llm_error: ${err.message}` });
+        controller.close();
+        return;
       }
 
       // Try to gather citations from grounding metadata
