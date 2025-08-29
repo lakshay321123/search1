@@ -3,15 +3,13 @@ import { useState, useRef, useMemo } from 'react';
 
 type Cite = { id: string; url: string; title: string; snippet?: string };
 type Profile = { title?: string; description?: string; extract?: string; image?: string; wikiUrl?: string };
-type Candidate = { title: string; description?: string; image?: string; url: string };
+type Candidate = { title: string; description?: string; pageUrl?: string; image?: string };
 type RelatedItem = { label: string; prompt: string };
-type Place = { id: string; name: string; type: string; address?: string; lat: number; lon: number; distance_m?: number; phone?: string; website?: string; osmUrl?: string };
+type Place = { id: string; name: string; address?: string; lat: number; lon: number; distance_m?: number; phone?: string; website?: string; category?: string; source?: string; osmUrl?: string };
 
 export default function Home() {
-  const [query, setQuery] = useState('');            // empty by default
+  const [query, setQuery] = useState('');
   const [subject, setSubject] = useState<string|undefined>();
-  const [coords, setCoords] = useState<{lat:number, lon:number}|undefined>();
-  const [usingLocation] = useState(false);
   const [answer, setAnswer] = useState('');
   const [status, setStatus] = useState<string|undefined>();
   const [cites, setCites] = useState<Cite[]>([]);
@@ -30,6 +28,29 @@ export default function Home() {
     setCites([]); setAnswer(''); setPlaces([]); setConfidence(undefined); setStatus(undefined);
   }
 
+  function looksLocal(q: string) {
+    const s = q.toLowerCase();
+    return /\bnear\s*me\b|\bnearby\b/.test(s) || /doc|dr|doctor|clinic|lawyer|attorney|advocate|dentist|pharmacy|restaurant|cafe|bank|atm/.test(s) && /near|me|nearby/.test(s);
+  }
+
+  async function getCoordsIfNeeded(q: string): Promise<{lat:number,lon:number}|undefined> {
+    if (!looksLocal(q)) return undefined;
+    try {
+      const pos = await new Promise<GeolocationPosition>((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 6000 })
+      );
+      return { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    } catch {
+      try {
+        const r = await fetch('/api/geo', { cache: 'no-store' });
+        const j = await r.json();
+        return j?.coords || undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  }
+
   async function ask(e?: React.FormEvent, qOverride?: string) {
     if (e) e.preventDefault();
     if (busy) return;
@@ -43,22 +64,8 @@ export default function Home() {
     abortRef.current?.abort();
 
     const ac = new AbortController(); abortRef.current = ac;
-    const body:any = { query: q, subject };
-
-    // If user enabled location but we don't have coords yet, get them now (one-shot wait)
-    if (usingLocation && !coords && typeof navigator !== 'undefined' && navigator.geolocation) {
-      setStatus('Getting your location…');
-      try {
-        const pos = await new Promise<GeolocationPosition>((res, rej) =>
-          navigator.geolocation.getCurrentPosition(res, rej, { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 })
-        );
-        body.coords = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-      } catch (err:any) {
-        setStatus(`Location error: ${err?.message || 'denied'}`);
-      }
-    } else if (usingLocation && coords) {
-      body.coords = coords;
-    }
+    const coords = await getCoordsIfNeeded(q);
+    const body:any = { query: q, coords };
 
     const resp = await fetch('/api/ask', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -119,14 +126,11 @@ export default function Home() {
   };
 
   const socialLinks = useMemo(() => {
-    const find = (pred: (u: URL)=>boolean) =>
-      cites.find(c => { try { const u = new URL(c.url); return pred(u); } catch { return false; } });
-    const byHost = (host: string) => find(u => u.hostname.endsWith(host));
-    const wiki = cites.find(c => c.url.includes('wikipedia.org')) || (profile?.wikiUrl ? { id:'w', url:profile.wikiUrl, title:'Wikipedia' } as any : undefined);
-    const linkedin = byHost('linkedin.com');
-    const insta = byHost('instagram.com');
-    const fb = byHost('facebook.com');
-    const x = find(u => u.hostname.endsWith('x.com') || u.hostname.endsWith('twitter.com'));
+    const wiki = cites.find(c => /wikipedia\.org/.test(c.url));
+    const linkedin = cites.find(c => /linkedin\.com/.test(c.url));
+    const insta = cites.find(c => /instagram\.com/.test(c.url));
+    const fb = cites.find(c => /facebook\.com/.test(c.url));
+    const x = cites.find(c => /x\.com|twitter\.com/.test(c.url));
     return { wiki, linkedin, insta, fb, x };
   }, [cites, profile]);
 
@@ -135,15 +139,6 @@ export default function Home() {
       {/* Header with LOGO = HOME */}
       <div className="flex items-center justify-between mb-4">
         <button onClick={resetAll} className="text-3xl font-bold hover:opacity-80">Wizkid</button>
-        <button
-          onClick={() => navigator.geolocation?.getCurrentPosition(
-            pos => setCoords({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
-            () => setStatus('location denied')
-          )}
-          className="px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-sm"
-        >
-          {coords ? 'Location ✓' : 'Use my location'}
-        </button>
       </div>
 
       {/* Search bar */}
@@ -223,7 +218,8 @@ export default function Home() {
           ].map(([key,label]) => (
             <button key={key}
               onClick={() => { setDownReason(key); sendFeedback('down', key); }}
-              className={`px-2 py-1 rounded ${downReason===key ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}>
+              className={`px-2 py-1 rounded ${downReason===key ? 'bg-red-600/40' : 'bg-white/10 hover:bg-white/20'}`}
+            >
               {label}
             </button>
           ))}
@@ -238,7 +234,7 @@ export default function Home() {
             {places.map(p => (
               <a key={p.id} href={p.osmUrl} target="_blank" rel="noreferrer" className="block bg-white/5 p-4 rounded-xl hover:bg-white/10 transition">
                 <div className="font-semibold">{p.name}</div>
-                <div className="text-xs opacity-80">{p.type}{p.address ? ` • ${p.address}` : ''}</div>
+                <div className="text-xs opacity-80">{p.category}{p.address ? ` • ${p.address}` : ''}</div>
                 <div className="text-xs opacity-70 mt-1">
                   {p.distance_m != null ? `${Math.round(p.distance_m/100)/10} km` : ''} {p.phone ? `• ${p.phone}` : ''} {p.website ? `• ${new URL(p.website).hostname}` : ''}
                 </div>
@@ -268,3 +264,4 @@ export default function Home() {
     </main>
   );
 }
+
