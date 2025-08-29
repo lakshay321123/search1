@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { planAndFetch } from '../../../lib/think/orchestrator';
 import { summarizeWithCitations, relatedSuggestions } from '../../../lib/llm/tasks';
+import { ipLocate } from '../../../lib/geo/ip';
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const sse = (write: (s: string) => void) => (o: any) => write(`data: ${JSON.stringify(o)}\n\n`);
@@ -18,47 +19,66 @@ export async function POST(req: Request) {
     async start(controller) {
       const send = sse((s)=>controller.enqueue(enc(s)));
       try {
-        if (!query?.trim()) { send({event:'final', snapshot:{ id: rid(), markdown:'(empty query)', cites:[], timeline:[], confidence:'low' }}); controller.close(); return; }
-
-        const plan = await planAndFetch(query, coords);
-        if (plan.candidates?.length) send({ event:'candidates', candidates: plan.candidates });
-        if (plan.status) send({ event:'status', msg: plan.status });
-        if (plan.plan?.needLocation) { await streamPlain(send,'Please allow location to search near you.'); send({ event:'final', snapshot:{ id: rid(), markdown:'(need location)', cites:[], timeline:[], confidence:'low' } }); controller.close(); return; }
-
-        // Hero (people)
-        if (plan.profile) {
-          send({ event:'profile', profile: { title: plan.profile.title, description: plan.profile.description, extract: plan.profile.extract, image: plan.profile.image, wikiUrl: plan.profile.pageUrl } });
+        if (!query?.trim()) {
+          send({event:'final', snapshot:{ id: rid(), markdown:'(empty query)', cites:[], timeline:[], confidence:'low' }});
+          controller.close(); return;
         }
 
-        // Places (local)
+        let plan = await planAndFetch(query, coords);
+
+        // IP fallback for local queries when GPS is missing
+        if (plan.plan?.needLocation) {
+          send({ event:'status', msg:'No GPS permission — using approximate IP location…' });
+          const ip = await ipLocate();
+          if (ip) {
+            plan = await planAndFetch(query, ip);
+            send({ event:'geo', approx: ip });
+          } else {
+            await streamPlain(send,'Location needed for “near me” queries. Please enable location.');
+            send({ event:'final', snapshot:{ id: rid(), markdown:'(need location)', cites:[], timeline:[], confidence:'low' } });
+            controller.close(); return;
+          }
+        }
+
+        if (plan.candidates?.length) send({ event:'candidates', candidates: plan.candidates });
+        if (plan.status) send({ event:'status', msg: plan.status });
+
+        if (plan.profile) {
+          send({ event:'profile', profile: {
+            title: plan.profile.title, description: plan.profile.description,
+            extract: plan.profile.extract, image: plan.profile.image, wikiUrl: plan.profile.pageUrl
+          }});
+        }
+
         if (plan.places?.length) {
           send({ event:'places', places: plan.places });
-          await streamPlain(send, `Found ${plan.places.length} places. Showing the closest first.`);
+          await streamPlain(send, `Found ${plan.places.length} places. Showing closest first.`);
           send({ event:'final', snapshot:{ id: rid(), markdown:'(streamed)', cites:[], timeline:[], confidence: plan.places.length ? 'medium' : 'low' } });
           controller.close(); return;
         }
 
-        // Sources
         const cites = plan.cites || [];
         for (const c of cites) send({ event:'cite', cite: c });
 
-        // Related chips
+        // Related chips (non-blocking)
         const subj = plan.profile?.title || plan.plan.subject || query.trim();
-        relatedSuggestions(subj).then(items => send({ event:'related', items })).catch(()=>{});
+        relatedSuggestions(subj).forEach(()=>{});
+        send({ event:'related', items: relatedSuggestions(subj) });
 
-        // Summarize (only if we have some sources)
+        // Choose provider (for UI visibility only)
+        const provider = process.env.OPENAI_API_KEY ? 'openai' : (process.env.GEMINI_API_KEY ? 'gemini' : 'none');
+        send({ event:'llm', provider });
+
         if (!cites.length) {
-          const missing: string[] = [];
-          if (!process.env.GOOGLE_CSE_ID || !process.env.GOOGLE_CSE_KEY) missing.push('Google CSE');
-          if (!process.env.GEMINI_API_KEY && !process.env.OPENAI_API_KEY) missing.push('LLM provider');
-          await streamPlain(send, `No sources yet — broadening web search or keys missing (${missing.join(', ') || 'none'}).`);
+          await streamPlain(send, `No sources found. Make sure your Google CSE is set to “Search the entire web”.`);
           send({ event:'final', snapshot:{ id: rid(), markdown:'(no sources)', cites:[], timeline:[], confidence:'low' } });
           controller.close(); return;
         }
 
+        // Summarize with LLM (auto provider inside summarizeWithCitations)
         const text = await summarizeWithCitations({
           subject: subj,
-          sources: cites.map((c)=>({ title:c.title, url:c.url })),
+          sources: cites.map(c => ({ title: c.title, url: c.url })),
           style: "simple"
         });
         await streamPlain(send, text);
