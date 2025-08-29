@@ -1,45 +1,93 @@
-import { generateText } from "./provider";
+import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-export async function summarizeWithCitations(opts: {
+type Source = { title: string; url: string };
+type SummarizeOpts = {
   subject: string;
-  sources: { title: string; url: string }[];
+  sources: Source[];
   style?: "simple" | "expert";
-}): Promise<string> {
-  const system = `You are Wizkid. Write a concise answer in ≤200 words.
-- Use inline [n] citations that match the numbered list provided.
-- No speculation; only use the listed sources.
-- Tone: ${opts.style === "expert" ? "Expert" : "Simple"}.`;
+};
 
-  const sourceList = opts.sources.map((s, i) => `[${i+1}] ${s.title} — ${s.url}`).join("\n");
-  const prompt = `${system}
+function numberedList(sources: Source[]) {
+  return sources.map((s, i) => `[${i + 1}] ${s.title} — ${s.url}`).join("\n");
+}
 
-Subject/Query: ${opts.subject}
+export async function summarizeWithCitations(opts: SummarizeOpts): Promise<string> {
+  const { subject, sources, style = "simple" } = opts;
+  const list = numberedList(sources);
+
+  const sys = `You are Wizkid, a neutral, citation-first assistant.
+Write a concise answer in <= 200 words. Add [n] citations that refer to the numbered sources.
+No speculation. Prefer official or high-quality sources. Style: ${style}.`;
+
+  const user = `Subject/Query: ${subject}
 
 Numbered sources:
-${sourceList}`;
+${list || "(none)"}
 
-  return generateText({ prompt, system });
+Instructions:
+- Start with the most important fact/conclusion.
+- Each claim that comes from a source must include an inline [n] citation.
+- If there are no sources, say so briefly and suggest a better query.`;
+
+  // Prefer OpenAI if available
+  const hasOpenAI = !!process.env.OPENAI_API_KEY;
+  const hasGemini = !!process.env.GEMINI_API_KEY;
+
+  if (!hasOpenAI && !hasGemini) {
+    // Nothing to call; return a graceful hint
+    return `I don't have access to a language model right now. Please add OPENAI_API_KEY or GEMINI_API_KEY in Vercel.`;
+  }
+
+  if (hasOpenAI) {
+    try {
+      const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+      const messages: ChatCompletionMessageParam[] = [
+        { role: "system", content: sys },
+        { role: "user", content: user }
+      ];
+      const r = await client.chat.completions.create({
+        model,
+        temperature: 0.2,
+        messages
+      });
+      const text = (r.choices?.[0]?.message?.content || "").trim();
+      if (text) return text;
+    } catch (e: any) {
+      // fall through to Gemini
+    }
+  }
+
+  if (hasGemini) {
+    try {
+      const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+      // small, cheap + stable
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash-8b" });
+      const res = await model.generateContent({
+        contents: [{ role: "user", parts: [{ text: `${sys}\n\n${user}` }]}]
+      });
+      const text =
+        res.response?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") ||
+        res.response?.text() ||
+        "";
+      if (text?.trim()) return text.trim();
+    } catch (e: any) {
+      // no provider worked
+    }
+  }
+
+  return `LLM temporarily unavailable or rate-limited. Showing sources above. Try again in a minute.`;
 }
 
-export async function expandQueries(query: string): Promise<string[]> {
-  const system = "You are a helpful search strategist.";
-  const prompt = `Rewrite and expand the user query for web search. 
-Return 4–6 short diverse queries, one per line, no numbering.
-User query: ${query}`;
-  const text = await generateText({ prompt, system });
-  return text.split("\n").map(s=>s.trim()).filter(Boolean).slice(0,6);
-}
-
-export async function relatedSuggestions(subject: string): Promise<{label:string; prompt:string}[]> {
-  const system = "You generate follow-up questions that are actionable for search.";
-  const prompt = `Generate 5 concise follow-up questions (≤8 words each) about: ${subject}.
-Return as lines: label | full prompt`;
-  const text = await generateText({ prompt, system });
-  const lines = text.split("\n").map(s=>s.trim()).filter(Boolean);
-  const items = lines.map(l=>{
-    const [label, rest] = l.split("|");
-    const clean = (s?:string)=> (s||"").trim();
-    return { label: clean(label), prompt: clean(rest||label) };
-  }).filter(x=>x.label);
-  return items.slice(0,5);
+export function relatedSuggestions(nameOrQuery: string) {
+  const n = nameOrQuery;
+  return [
+    { label: "Overview",     prompt: `Give a concise overview of ${n}.` },
+    { label: "Pros & cons",  prompt: `What are the pros and cons of ${n}?` },
+    { label: "How-to",       prompt: `How do I get started with ${n}?` },
+    { label: "Alternatives", prompt: `What are the top alternatives to ${n}?` },
+    { label: "Deeper dive",  prompt: `Explain ${n} in depth with sources.` }
+  ];
 }
